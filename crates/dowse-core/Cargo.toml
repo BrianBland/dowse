@@ -1,0 +1,13 @@
+[package]
+name = "dowse-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dowse-types = { path = "../dowse-types" }
+alloy-primitives = { workspace = true }
+revm = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+hex = { workspace = true }

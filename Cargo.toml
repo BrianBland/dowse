@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/dowse-types",
+    "crates/dowse-core",
+    "crates/dowse-analyze",
+    "crates/dowse-cli",
+]
+resolver = "2"
+
+[workspace.dependencies]
+alloy-primitives = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+revm = "36"
+clap = { version = "4", features = ["derive", "env"] }
+hex = "0.4"

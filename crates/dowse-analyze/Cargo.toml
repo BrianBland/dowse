@@ -1,0 +1,13 @@
+[package]
+name = "dowse-analyze"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dowse-types = { path = "../dowse-types" }
+alloy-primitives = { workspace = true }
+serde = { workspace = true }
+revm = { workspace = true }
+
+[dev-dependencies]
+rand = "0.9"

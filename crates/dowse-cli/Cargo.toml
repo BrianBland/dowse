@@ -1,0 +1,15 @@
+[package]
+name = "dowse-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dowse-types = { path = "../dowse-types" }
+dowse-core = { path = "../dowse-core" }
+dowse-analyze = { path = "../dowse-analyze" }
+clap = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-provider = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
