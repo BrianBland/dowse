@@ -17,7 +17,10 @@ pub fn score_hints(
     target: Address,
     selector: Option<alloy_primitives::FixedBytes<4>>,
 ) -> HintScore {
-    let predicted = resolve_predicted(hints, calldata, caller, target, selector);
+    let predicted: HashSet<RecordedAccess> =
+        resolve_predicted(hints, calldata, caller, target, selector)
+            .into_iter()
+            .collect();
     let actual: HashSet<RecordedAccess> = recorded.iter().cloned().collect();
 
     let mut hits = 0u64;
@@ -31,8 +34,10 @@ pub fn score_hints(
         }
     }
 
-    let predicted_set: HashSet<&RecordedAccess> = predicted.iter().collect();
-    let uncovered = actual.iter().filter(|a| !predicted_set.contains(a)).count() as u64;
+    let uncovered = actual
+        .iter()
+        .filter(|access| !predicted.contains(access))
+        .count() as u64;
 
     HintScore {
         hits,
@@ -99,7 +104,9 @@ pub fn score_hints_batch(
     let mut total = HintScore::default();
     for (target, caller, calldata, accesses) in traces {
         let selector = if calldata.len() >= 4 {
-            Some(alloy_primitives::FixedBytes::<4>::from_slice(&calldata[..4]))
+            Some(alloy_primitives::FixedBytes::<4>::from_slice(
+                &calldata[..4],
+            ))
         } else {
             None
         };
@@ -114,7 +121,7 @@ pub fn score_hints_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, Address, B256, FixedBytes};
+    use alloy_primitives::{address, Address, FixedBytes, B256};
     use dowse_types::{HintTable, PrefetchItem, SlotExpression};
 
     const DUMMY_HASH: B256 = B256::repeat_byte(0xAB);
@@ -189,5 +196,39 @@ mod tests {
         assert_eq!(score.hits, 1);
         assert_eq!(score.misses, 1);
         assert_eq!(score.uncovered, 1);
+    }
+
+    #[test]
+    fn duplicate_predictions_are_scored_once() {
+        let addr = address!("0xdead000000000000000000000000000000000001");
+        let slot = B256::with_last_byte(1);
+
+        let mut hints = HintTable::new();
+        let sel = FixedBytes::from([0x01, 0x02, 0x03, 0x04]);
+        hints.insert(
+            addr,
+            DUMMY_HASH,
+            Some(sel),
+            vec![
+                PrefetchItem::Storage {
+                    slot: SlotExpression::Concrete { value: slot },
+                },
+                PrefetchItem::Storage {
+                    slot: SlotExpression::Concrete { value: slot },
+                },
+            ],
+        );
+
+        let recorded = vec![RecordedAccess::Storage {
+            address: addr,
+            slot,
+        }];
+        let calldata = vec![0x01, 0x02, 0x03, 0x04];
+
+        let score = score_hints(&hints, &recorded, &calldata, Address::ZERO, addr, Some(sel));
+
+        assert_eq!(score.hits, 1);
+        assert_eq!(score.misses, 0);
+        assert_eq!(score.uncovered, 0);
     }
 }
