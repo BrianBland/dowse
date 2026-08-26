@@ -91,7 +91,8 @@ implementation address) are captured.
 Builds a hint table from recorded execution traces.
 
 ```
-dowse infer --traces <FILE> [--format human|json|binary] [--output <FILE>]
+dowse infer --traces <FILE> [--fixed-slot-min-frequency 0.8] \
+  [--format human|json|binary] [--output <FILE>]
 ```
 
 ### `inspect`
@@ -215,7 +216,8 @@ Maximum branch depth: 32. Visited `(pc, stack_fingerprint)` states prevent loops
 `infer_from_traces` builds a hint table from recorded execution data instead of
 bytecode. It groups traces by `(address, selector)`, emits `Concrete` slots that
 appear in ≥80% of traces, and attempts to reverse-engineer `keccak256` mapping slots
-by trying common calldata offsets and base slot indices.
+by trying common calldata offsets, the transaction sender, and base slot indices.
+`--fixed-slot-min-frequency` makes the concrete-slot threshold configurable.
 
 ## Proxy detection
 

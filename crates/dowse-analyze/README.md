@@ -31,11 +31,14 @@ ready for insertion into a `HintTable`.
 ## Trace inference (`trace` module)
 
 `infer_from_traces(traces: &[TraceRecord]) -> HintTable` builds hints from recorded
-execution data. Useful when bytecode analysis alone doesn't capture all accessed slots
-(e.g. behind complex dispatch logic).
+execution data. `infer_from_traces_with_threshold` allows trading additional concrete-slot
+coverage for speculative reads. This is useful when bytecode analysis alone doesn't capture
+all accessed slots (e.g. behind complex dispatch logic).
 
 Algorithm per `(address, selector)` group:
 1. **Fixed slots** — slots appearing in ≥80% of traces → `Concrete` items.
 2. **Mapping slots** — tries `keccak256(calldata[offset..offset+32], base_slot)` for
    offsets 4/36/68 and base slots 0–9. If ≥50% of traces match, emits a `Keccak256`
    expression.
+3. **Caller mappings** — when traces include the transaction sender, tries
+   `keccak256(caller, base_slot)` for base slots 0–9.
