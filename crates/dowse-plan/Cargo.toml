@@ -1,0 +1,8 @@
+[package]
+name = "dowse-plan"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dowse-types = { path = "../dowse-types" }
+alloy-primitives = { workspace = true }

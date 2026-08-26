@@ -1543,6 +1543,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dowse-plan"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "dowse-types",
+]
+
+[[package]]
 name = "dowse-types"
 version = "0.1.0"
 dependencies = [

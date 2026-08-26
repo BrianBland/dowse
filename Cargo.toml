@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/dowse-types",
+    "crates/dowse-plan",
     "crates/dowse-core",
     "crates/dowse-analyze",
     "crates/dowse-cli",

@@ -23,6 +23,7 @@ analyze bytecode ──→ HintTable ──→ PrefetchInspector ──→ warm 
 | Crate | Purpose |
 |---|---|
 | `dowse-types` | `HintTable`, `PrefetchItem`, `SlotExpression` — the shared data model |
+| `dowse-plan` | Resolve transaction context into bounded background prefetch targets, without `revm` |
 | `dowse-analyze` | Symbolic EVM + trace inference → produces `HintTable` entries |
 | `dowse-core` | Runtime components: `PrefetchInspector`, `RecordingInspector`, proxy detection, trimming, scoring |
 | `dowse-cli` | `dowse` binary — generate, inspect, validate, merge, convert |
