@@ -9,7 +9,7 @@ use alloy_primitives::{Address, B256};
 use alloy_provider::{Provider, ProviderBuilder};
 use clap::{Parser, Subcommand, ValueEnum};
 use dowse_analyze::bytecode::{analyze_bytecode, analyzed_to_entries};
-use dowse_analyze::trace::TraceRecord;
+use dowse_analyze::trace::{TraceRecord, infer_from_traces};
 use dowse_core::proxy;
 use dowse_core::score::score_hints_batch;
 use dowse_types::{HintTable, PrefetchItem, RecordedAccess};
@@ -64,6 +64,21 @@ enum Commands {
 
         /// Output format
         #[arg(long, default_value = "human")]
+        format: OutputFormat,
+
+        /// Output file (stdout if not specified)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Infer a hint table from recorded execution traces
+    Infer {
+        /// Path to traces JSON file
+        #[arg(long)]
+        traces: PathBuf,
+
+        /// Output format
+        #[arg(long, default_value = "json")]
         format: OutputFormat,
 
         /// Output file (stdout if not specified)
@@ -139,6 +154,9 @@ async fn main() {
             output,
         } => {
             cmd_generate(address, bytecode, rpc_url, no_proxy, recursive, depth, &format, output.as_deref()).await;
+        }
+        Commands::Infer { traces, format, output } => {
+            cmd_infer(&traces, &format, output.as_deref())
         }
         Commands::Validate { hints, traces } => cmd_validate(&hints, &traces),
         Commands::Inspect { hints, format } => cmd_inspect(&hints, &format),
@@ -531,6 +549,18 @@ async fn fetch_impl_bytecode(
         eprintln!("Got {} bytes of implementation bytecode", impl_code.len());
         (impl_code.to_vec(), hint_address)
     }
+}
+
+fn cmd_infer(
+    traces_path: &std::path::Path,
+    fmt: &OutputFormat,
+    output: Option<&std::path::Path>,
+) {
+    let traces_json = fs::read_to_string(traces_path).expect("Failed to read traces file");
+    let traces: Vec<TraceRecord> =
+        serde_json::from_str(&traces_json).expect("Failed to parse traces JSON");
+    let table = infer_from_traces(&traces);
+    write_table(&table, fmt, output);
 }
 
 fn cmd_validate(hints_path: &std::path::Path, traces_path: &std::path::Path) {

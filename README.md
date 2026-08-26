@@ -51,6 +51,9 @@ dowse inspect --hints hints.json
 # Validate hints against recorded traces
 dowse validate --hints hints.json --traces traces.json
 
+# Infer hints from recorded traces
+dowse infer --traces traces.json --output inferred-hints.json
+
 # Merge multiple hint tables
 dowse merge hints-a.json hints-b.json --output merged.json
 
@@ -82,6 +85,14 @@ Proxy detection runs automatically unless `--no-proxy` is passed. EIP-1967,
 OpenZeppelin legacy, and beacon proxy patterns are recognized. Proxy bytecode is
 analyzed alongside the implementation so that proxy-level SLOADs (e.g. loading the
 implementation address) are captured.
+
+### `infer`
+
+Builds a hint table from recorded execution traces.
+
+```
+dowse infer --traces <FILE> [--format human|json|binary] [--output <FILE>]
+```
 
 ### `inspect`
 
