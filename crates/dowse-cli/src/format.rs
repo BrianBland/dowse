@@ -20,13 +20,16 @@ const BLUE: &str = "\x1b[34m";
 fn item_sort_key(item: &PrefetchItem) -> (u8, String) {
     match item {
         PrefetchItem::Storage { slot } => (0, format_slot_expr(slot)),
+        PrefetchItem::ExternalStorage { address, slot } => {
+            (1, format!("{address}{}", format_slot_expr(slot)))
+        }
         PrefetchItem::Account { address, selector } => {
             let sel_str = selector.map(|s| format!("0x{}", hex::encode(s))).unwrap_or_default();
-            (1, format!("{address}{sel_str}"))
+            (2, format!("{address}{sel_str}"))
         }
         PrefetchItem::ComputedAccount { address, selector } => {
             let sel_str = selector.map(|s| format!("0x{}", hex::encode(s))).unwrap_or_default();
-            (2, format!("{}{sel_str}", format_slot_expr(address)))
+            (3, format!("{}{sel_str}", format_slot_expr(address)))
         }
     }
 }
@@ -63,6 +66,13 @@ pub fn write_human(table: &HintTable, w: &mut impl Write) -> io::Result<()> {
                 match item {
                     PrefetchItem::Storage { slot } => {
                         writeln!(w, "    {GREEN}{}{RESET}", format_slot_expr(slot))?;
+                    }
+                    PrefetchItem::ExternalStorage { address, slot } => {
+                        writeln!(
+                            w,
+                            "    {GREEN}external_storage{RESET}({CYAN}{address}{RESET}, {GREEN}{}{RESET})",
+                            format_slot_expr(slot)
+                        )?;
                     }
                     PrefetchItem::Account { address, selector: Some(sel) } => {
                         writeln!(w, "    {BLUE}account{RESET}({CYAN}{address}{RESET}, {MAGENTA}0x{}{RESET})", hex::encode(sel))?;
@@ -120,6 +130,7 @@ pub fn format_slot_expr(expr: &SlotExpression) -> String {
 //   0x03 = ComputedAccount (no selector): [encoded SlotExpression]
 //   0x04 = Account (with selector): [20B address][4B selector]
 //   0x05 = ComputedAccount (with selector): [encoded SlotExpression][4B selector]
+//   0x06 = ExternalStorage: [20B address][encoded SlotExpression]
 //
 // SlotExpression encoding (1-byte tag + payload):
 //   0x01 Concrete: [32B value]
@@ -189,6 +200,11 @@ fn write_binary_item(item: &PrefetchItem, w: &mut impl Write) -> io::Result<()> 
         }
         PrefetchItem::Storage { slot } => {
             w.write_all(&[0x02])?;
+            write_binary_slot_expr(slot, w)?;
+        }
+        PrefetchItem::ExternalStorage { address, slot } => {
+            w.write_all(&[0x06])?;
+            w.write_all(address.as_slice())?;
             write_binary_slot_expr(slot, w)?;
         }
         PrefetchItem::ComputedAccount { address, selector: None } => {
@@ -353,6 +369,18 @@ fn read_binary_item(data: &[u8], cursor: &mut usize) -> io::Result<PrefetchItem>
             let selector = Some(FixedBytes::<4>::from_slice(&data[*cursor..*cursor + 4]));
             *cursor += 4;
             Ok(PrefetchItem::ComputedAccount { address, selector })
+        }
+        0x06 => {
+            if *cursor + 20 > data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated external storage address",
+                ));
+            }
+            let address = Address::from_slice(&data[*cursor..*cursor + 20]);
+            *cursor += 20;
+            let slot = read_binary_slot_expr(data, cursor)?;
+            Ok(PrefetchItem::ExternalStorage { address, slot })
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -585,6 +613,33 @@ mod tests {
 
         assert_eq!(restored.selector_count(), 1);
         assert!(restored.lookup(addr, None).is_some());
+    }
+
+    #[test]
+    fn external_storage_binary_and_human_roundtrip() {
+        let addr = address!("0xdead000000000000000000000000000000000001");
+        let external = address!("0xdead000000000000000000000000000000000002");
+        let mut table = HintTable::new();
+        table.insert(
+            addr,
+            DUMMY_HASH,
+            None,
+            vec![PrefetchItem::ExternalStorage {
+                address: external,
+                slot: SlotExpression::CalldataWord { offset: 4 },
+            }],
+        );
+
+        let mut binary = Vec::new();
+        write_binary(&table, &mut binary).unwrap();
+        let restored = read_binary(&mut binary.as_slice()).unwrap();
+        assert_eq!(restored.lookup(addr, None), table.lookup(addr, None));
+
+        let mut human = Vec::new();
+        write_human(&table, &mut human).unwrap();
+        let human = String::from_utf8(human).unwrap();
+        assert!(human.contains("external_storage"));
+        assert!(human.contains(&external.to_string()));
     }
 
     #[test]

@@ -109,6 +109,22 @@ impl<'a> PrefetchPlanner<'a> {
                         self.limits.storage_slots,
                     );
                 }
+                PrefetchItem::ExternalStorage { address, slot } => {
+                    push_account(&mut plan, &mut accounts, *address, self.limits.accounts);
+                    let Some(slot) = resolve_expression(slot, &context) else {
+                        plan.diagnostics.unresolved_items += 1;
+                        continue;
+                    };
+                    push_storage(
+                        &mut plan,
+                        &mut storage,
+                        StorageTarget {
+                            address: *address,
+                            slot,
+                        },
+                        self.limits.storage_slots,
+                    );
+                }
                 PrefetchItem::ComputedAccount { address, .. } => {
                     let Some(address) = resolve_expression(address, &context) else {
                         plan.diagnostics.unresolved_items += 1;
@@ -249,6 +265,28 @@ mod tests {
             }]
         );
         assert_eq!(plan.diagnostics, PlanDiagnostics::default());
+    }
+
+    #[test]
+    fn resolves_external_storage_against_top_level_calldata() {
+        let mut hints = HintTable::new();
+        hints.insert(
+            TARGET,
+            CODE_HASH,
+            Some(SELECTOR),
+            vec![PrefetchItem::ExternalStorage {
+                address: ACCOUNT,
+                slot: SlotExpression::CalldataWord { offset: 4 },
+            }],
+        );
+        let word = B256::with_last_byte(7);
+
+        let plan = PrefetchPlanner::new(&hints, PlanLimits::new(1, 1))
+            .plan(TARGET, CALLER, &calldata(word))
+            .unwrap();
+
+        assert_eq!(plan.accounts, vec![ACCOUNT]);
+        assert_eq!(plan.storage, vec![StorageTarget { address: ACCOUNT, slot: word }]);
     }
 
     #[test]

@@ -71,12 +71,19 @@ fn infer_items_for_group(contract: Address, traces: &[&TraceRecord]) -> Vec<Pref
     let threshold = (total as f64 * 0.8).ceil() as usize;
 
     let mut fixed_slots = HashSet::new();
-    for ((addr, slot), count) in &slot_counts {
-        if *count >= threshold && *addr == contract {
-            items.push(PrefetchItem::Storage {
-                slot: SlotExpression::Concrete { value: *slot },
-            });
-            fixed_slots.insert((*addr, *slot));
+    for ((address, slot), count) in &slot_counts {
+        if *count >= threshold {
+            if *address == contract {
+                items.push(PrefetchItem::Storage {
+                    slot: SlotExpression::Concrete { value: *slot },
+                });
+            } else {
+                items.push(PrefetchItem::ExternalStorage {
+                    address: *address,
+                    slot: SlotExpression::Concrete { value: *slot },
+                });
+            }
+            fixed_slots.insert((*address, *slot));
         }
     }
 
@@ -102,56 +109,64 @@ fn try_infer_mappings(
     variable_slots: &[(Address, B256)],
 ) -> Vec<PrefetchItem> {
     let mut results = Vec::new();
-    let mut found_offsets: HashSet<(usize, B256)> = HashSet::new();
+    let mut found_targets: HashSet<(Address, usize, B256)> = HashSet::new();
+    let addresses: HashSet<Address> = variable_slots.iter().map(|(address, _)| *address).collect();
 
     // Try common calldata offsets (4, 36, 68 = first 3 args including selector prefix)
     for arg_idx in 0..3 {
         let calldata_offset = 4 + arg_idx * 32;
 
         // Try common base slots (0..10)
-        for base_idx in 0u8..10 {
-            let base_slot = B256::with_last_byte(base_idx);
+        for address in &addresses {
+            for base_idx in 0u8..10 {
+                let base_slot = B256::with_last_byte(base_idx);
 
-            let mut matches = 0usize;
-            let mut checked = 0usize;
+                let mut matches = 0usize;
+                let mut checked = 0usize;
 
-            for trace in traces {
-                let cd = &trace.calldata;
-                let start = calldata_offset;
-                let end = start + 32;
-                if cd.len() < end {
-                    continue;
-                }
-                checked += 1;
+                for trace in traces {
+                    let cd = &trace.calldata;
+                    let start = calldata_offset;
+                    let end = start + 32;
+                    if cd.len() < end {
+                        continue;
+                    }
+                    checked += 1;
 
-                let key_bytes = &cd[start..end];
-                let expected_slot = keccak256_mapping(key_bytes, &base_slot);
+                    let key_bytes = &cd[start..end];
+                    let expected_slot = keccak256_mapping(key_bytes, &base_slot);
 
-                // Check if any variable slot matches
-                for (addr, slot) in variable_slots {
-                    if *addr == contract && *slot == expected_slot {
+                    if trace
+                        .storage_accesses
+                        .iter()
+                        .any(|access| access == &(*address, expected_slot))
+                    {
                         matches += 1;
-                        break;
                     }
                 }
-            }
 
-            // If >= 50% of traces match this pattern, emit it
-            if checked > 0
-                && matches * 2 >= checked
-                && !found_offsets.contains(&(calldata_offset, base_slot))
-            {
-                found_offsets.insert((calldata_offset, base_slot));
-                results.push(PrefetchItem::Storage {
-                    slot: SlotExpression::Keccak256 {
+                // If >= 50% of traces match this pattern, emit it.
+                if checked > 0
+                    && matches * 2 >= checked
+                    && found_targets.insert((*address, calldata_offset, base_slot))
+                {
+                    let slot = SlotExpression::Keccak256 {
                         inputs: vec![
                             SlotExpression::CalldataWord {
                                 offset: calldata_offset,
                             },
                             SlotExpression::Concrete { value: base_slot },
                         ],
-                    },
-                });
+                    };
+                    if *address == contract {
+                        results.push(PrefetchItem::Storage { slot });
+                    } else {
+                        results.push(PrefetchItem::ExternalStorage {
+                            address: *address,
+                            slot,
+                        });
+                    }
+                }
             }
         }
     }
@@ -235,6 +250,63 @@ mod tests {
             } if inputs.len() == 2
                 && matches!(&inputs[0], SlotExpression::CalldataWord { offset: 4 })
                 && matches!(&inputs[1], SlotExpression::Concrete { value: bs } if *bs == base_slot)
+        )));
+    }
+
+    #[test]
+    fn infer_fixed_external_slot() {
+        let contract = address!("0xdead000000000000000000000000000000000001");
+        let external = address!("0xdead000000000000000000000000000000000002");
+        let slot = B256::with_last_byte(5);
+        let traces: Vec<TraceRecord> = (0..5)
+            .map(|_| TraceRecord {
+                address: contract,
+                calldata: Bytes::from(vec![1, 2, 3, 4]),
+                storage_accesses: vec![(external, slot)],
+            })
+            .collect();
+
+        let table = infer_from_traces(&traces);
+        let items = table.lookup(contract, Some(FixedBytes::from([1, 2, 3, 4]))).unwrap();
+        assert!(matches!(
+            &items[0],
+            PrefetchItem::ExternalStorage {
+                address,
+                slot: SlotExpression::Concrete { value }
+            } if *address == external && *value == slot
+        ));
+    }
+
+    #[test]
+    fn infer_external_mapping_pattern() {
+        let contract = address!("0xdead000000000000000000000000000000000001");
+        let external = address!("0xdead000000000000000000000000000000000002");
+        let base_slot = B256::with_last_byte(3);
+        let selector = [0x70, 0xa0, 0x82, 0x31];
+        let traces: Vec<TraceRecord> = (1u8..=5)
+            .map(|value| {
+                let mut calldata = Vec::from(selector);
+                let mut key = vec![0u8; 32];
+                key[31] = value;
+                calldata.extend_from_slice(&key);
+                TraceRecord {
+                    address: contract,
+                    calldata: Bytes::from(calldata),
+                    storage_accesses: vec![(external, keccak256_mapping(&key, &base_slot))],
+                }
+            })
+            .collect();
+
+        let table = infer_from_traces(&traces);
+        let items = table.lookup(contract, Some(FixedBytes::from(selector))).unwrap();
+        assert!(items.iter().any(|item| matches!(
+            item,
+            PrefetchItem::ExternalStorage {
+                address,
+                slot: SlotExpression::Keccak256 { inputs }
+            } if *address == external
+                && matches!(&inputs[0], SlotExpression::CalldataWord { offset: 4 })
+                && matches!(&inputs[1], SlotExpression::Concrete { value } if *value == base_slot)
         )));
     }
 }

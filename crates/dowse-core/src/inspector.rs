@@ -89,6 +89,16 @@ where
                                 self.stats.items_failed += 1;
                             }
                         }
+                        PrefetchItem::ExternalStorage { address, slot } => {
+                            if let Some(key) = resolve_slot(slot, &ctx) {
+                                match db.storage(*address, key) {
+                                    Ok(_) => self.stats.items_prefetched += 1,
+                                    Err(_) => self.stats.items_failed += 1,
+                                }
+                            } else {
+                                self.stats.items_failed += 1;
+                            }
+                        }
                         PrefetchItem::ComputedAccount { address: expr, selector } => {
                             if let Some(key) = resolve_slot(expr, &ctx) {
                                 let addr = Address::from_word(key.into());

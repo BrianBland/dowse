@@ -113,8 +113,9 @@ pub enum SlotExpression {
 
 /// A single prefetch target.
 ///
-/// Storage items are relative to their containing address context in the hint
-/// table — the target address is implicit from the `HintTable` key.
+/// [`PrefetchItem::Storage`] items are relative to their containing address context in the hint
+/// table — the target address is implicit from the `HintTable` key. External storage items carry
+/// their target address explicitly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum PrefetchItem {
@@ -130,6 +131,12 @@ pub enum PrefetchItem {
 
     /// Load a storage slot on the current contract.
     Storage { slot: SlotExpression },
+
+    /// Load a storage slot on a known external contract.
+    ExternalStorage {
+        address: Address,
+        slot: SlotExpression,
+    },
 
     /// Load account info for a computed address (e.g., CREATE2-derived pool addresses).
     /// The address is determined by evaluating the expression at runtime.
@@ -543,6 +550,23 @@ mod tests {
             let restored: SlotExpression = serde_json::from_str(&json).unwrap();
             assert_eq!(*expr, restored);
         }
+    }
+
+    #[test]
+    fn serde_preserves_storage_and_supports_external_storage() {
+        let storage: PrefetchItem = serde_json::from_str(
+            r#"{"kind":"Storage","slot":{"type":"Concrete","value":"0x0000000000000000000000000000000000000000000000000000000000000001"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(storage, PrefetchItem::Storage { .. }));
+
+        let external = PrefetchItem::ExternalStorage {
+            address: Address::repeat_byte(0x11),
+            slot: SlotExpression::Concrete { value: B256::with_last_byte(1) },
+        };
+        let json = serde_json::to_string(&external).unwrap();
+        assert!(json.contains(r#""kind":"ExternalStorage""#));
+        assert_eq!(serde_json::from_str::<PrefetchItem>(&json).unwrap(), external);
     }
 
     /// Wildcard (None) selector keys must serialize as "*" and roundtrip.

@@ -34,6 +34,9 @@ pub fn trim_hint_table(table: &HintTable, min_dynamic_items: usize) -> HintTable
                     PrefetchItem::Storage { slot } if is_dynamic_slot(slot)
                 ) || matches!(
                     item,
+                    PrefetchItem::ExternalStorage { slot, .. } if is_dynamic_slot(slot)
+                ) || matches!(
+                    item,
                     PrefetchItem::ComputedAccount { address, .. } if is_dynamic_slot(address)
                 ))
                 .count();
@@ -54,6 +57,7 @@ pub fn is_valuable_item(item: &PrefetchItem) -> bool {
     match item {
         PrefetchItem::Account { .. } => true,
         PrefetchItem::Storage { slot } => is_dynamic_slot(slot),
+        PrefetchItem::ExternalStorage { slot, .. } => is_dynamic_slot(slot),
         PrefetchItem::ComputedAccount { address, .. } => is_dynamic_slot(address),
     }
 }

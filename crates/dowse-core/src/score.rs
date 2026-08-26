@@ -70,6 +70,14 @@ fn resolve_predicted(
                     });
                 }
             }
+            PrefetchItem::ExternalStorage { address, slot } => {
+                if let Some(key) = resolve_slot(slot, &ctx) {
+                    result.push(RecordedAccess::Storage {
+                        address: *address,
+                        slot: B256::from(key),
+                    });
+                }
+            }
             PrefetchItem::ComputedAccount { address: expr, .. } => {
                 if let Some(key) = resolve_slot(expr, &ctx) {
                     let addr = Address::from_word(key.into());
