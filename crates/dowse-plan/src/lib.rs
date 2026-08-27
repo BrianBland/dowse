@@ -97,13 +97,7 @@ impl<'a> PrefetchPlanner<'a> {
             let (item, confidence) = item.scored();
             match item {
                 PrefetchItem::Account { address, .. } => {
-                    push_account(
-                        &mut plan,
-                        &mut accounts,
-                        *address,
-                        confidence,
-                        self.limits.accounts,
-                    );
+                    push_account(&mut plan, &mut accounts, *address, confidence);
                 }
                 PrefetchItem::Storage { slot } => {
                     let Some(slot) = resolve_expression(slot, &context) else {
@@ -118,17 +112,10 @@ impl<'a> PrefetchPlanner<'a> {
                             slot,
                         },
                         confidence,
-                        self.limits.storage_slots,
                     );
                 }
                 PrefetchItem::ExternalStorage { address, slot } => {
-                    push_account(
-                        &mut plan,
-                        &mut accounts,
-                        *address,
-                        confidence,
-                        self.limits.accounts,
-                    );
+                    push_account(&mut plan, &mut accounts, *address, confidence);
                     let Some(slot) = resolve_expression(slot, &context) else {
                         plan.diagnostics.unresolved_items += 1;
                         continue;
@@ -141,7 +128,6 @@ impl<'a> PrefetchPlanner<'a> {
                             slot,
                         },
                         confidence,
-                        self.limits.storage_slots,
                     );
                 }
                 PrefetchItem::ComputedAccount { address, .. } => {
@@ -154,12 +140,24 @@ impl<'a> PrefetchPlanner<'a> {
                         &mut accounts,
                         Address::from_word(address),
                         confidence,
-                        self.limits.accounts,
                     );
                 }
                 PrefetchItem::Scored { .. } => unreachable!("scored() removes wrappers"),
             }
         }
+
+        prioritize_targets(
+            &mut plan.accounts,
+            &mut plan.account_confidence,
+            self.limits.accounts,
+            &mut plan.diagnostics,
+        );
+        prioritize_targets(
+            &mut plan.storage,
+            &mut plan.storage_confidence,
+            self.limits.storage_slots,
+            &mut plan.diagnostics,
+        );
 
         Some(plan)
     }
@@ -170,13 +168,10 @@ fn push_account(
     seen: &mut HashMap<Address, usize>,
     address: Address,
     confidence: f64,
-    limit: usize,
 ) {
     if let Some(index) = seen.get(&address) {
         plan.diagnostics.duplicate_items += 1;
         plan.account_confidence[*index] = plan.account_confidence[*index].max(confidence);
-    } else if plan.accounts.len() == limit {
-        plan.diagnostics.truncated_items += 1;
     } else {
         seen.insert(address, plan.accounts.len());
         plan.accounts.push(address);
@@ -189,17 +184,38 @@ fn push_storage(
     seen: &mut HashMap<StorageTarget, usize>,
     target: StorageTarget,
     confidence: f64,
-    limit: usize,
 ) {
     if let Some(index) = seen.get(&target) {
         plan.diagnostics.duplicate_items += 1;
         plan.storage_confidence[*index] = plan.storage_confidence[*index].max(confidence);
-    } else if plan.storage.len() == limit {
-        plan.diagnostics.truncated_items += 1;
     } else {
         seen.insert(target, plan.storage.len());
         plan.storage.push(target);
         plan.storage_confidence.push(confidence);
+    }
+}
+
+fn prioritize_targets<T>(
+    targets: &mut Vec<T>,
+    confidence: &mut Vec<f64>,
+    limit: usize,
+    diagnostics: &mut PlanDiagnostics,
+) {
+    let mut ranked = std::mem::take(targets)
+        .into_iter()
+        .zip(std::mem::take(confidence))
+        .enumerate()
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_index, (_, left)), (right_index, (_, right))| {
+        right
+            .total_cmp(left)
+            .then_with(|| left_index.cmp(right_index))
+    });
+    diagnostics.truncated_items += ranked.len().saturating_sub(limit);
+    ranked.truncate(limit);
+    for (_, (target, target_confidence)) in ranked {
+        targets.push(target);
+        confidence.push(target_confidence);
     }
 }
 
@@ -455,6 +471,56 @@ mod tests {
             .unwrap();
         assert_eq!(plan.account_confidence, vec![0.9]);
         assert_eq!(plan.storage_confidence, vec![0.8]);
+    }
+
+    #[test]
+    fn bounds_targets_after_prioritizing_confidence() {
+        let low_account = address!("0x4444000000000000000000000000000000000004");
+        let high_account = address!("0x5555000000000000000000000000000000000005");
+        let low_slot = B256::with_last_byte(1);
+        let high_slot = B256::with_last_byte(2);
+        let mut hints = HintTable::new();
+        hints.insert(
+            TARGET,
+            CODE_HASH,
+            Some(SELECTOR),
+            vec![
+                PrefetchItem::Account {
+                    address: low_account,
+                    selector: None,
+                }
+                .with_confidence(0.1),
+                PrefetchItem::Account {
+                    address: high_account,
+                    selector: None,
+                }
+                .with_confidence(0.9),
+                PrefetchItem::Storage {
+                    slot: SlotExpression::Concrete { value: low_slot },
+                }
+                .with_confidence(0.2),
+                PrefetchItem::Storage {
+                    slot: SlotExpression::Concrete { value: high_slot },
+                }
+                .with_confidence(0.8),
+            ],
+        );
+
+        let plan = PrefetchPlanner::new(&hints, PlanLimits::new(1, 1))
+            .plan(TARGET, CALLER, &calldata(B256::ZERO))
+            .unwrap();
+
+        assert_eq!(plan.accounts, vec![high_account]);
+        assert_eq!(plan.account_confidence, vec![0.9]);
+        assert_eq!(
+            plan.storage,
+            vec![StorageTarget {
+                address: TARGET,
+                slot: high_slot,
+            }]
+        );
+        assert_eq!(plan.storage_confidence, vec![0.8]);
+        assert_eq!(plan.diagnostics.truncated_items, 2);
     }
 
     #[test]
