@@ -2,14 +2,15 @@ mod format;
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::BufWriter;
+use std::io::{BufRead, BufReader, BufWriter};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::{Provider, ProviderBuilder};
 use clap::{Parser, Subcommand, ValueEnum};
 use dowse_analyze::bytecode::{analyze_bytecode, analyzed_to_entries};
-use dowse_analyze::trace::{infer_from_traces_with_threshold, TraceRecord};
+use dowse_analyze::trace::{infer_from_traces_with_threshold, OnlineHintLearner, TraceRecord};
 use dowse_core::proxy;
 use dowse_core::score::score_hints_batch;
 use dowse_types::{HintTable, PrefetchItem, RecordedAccess};
@@ -74,6 +75,25 @@ enum Commands {
     /// Infer a hint table from recorded execution traces
     Infer {
         /// Path to traces JSON file
+        #[arg(long)]
+        traces: PathBuf,
+
+        /// Minimum fraction of calls that must access a concrete slot
+        #[arg(long, default_value = "0.8")]
+        fixed_slot_min_frequency: f64,
+
+        /// Output format
+        #[arg(long, default_value = "json")]
+        format: OutputFormat,
+
+        /// Output file (stdout if not specified)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Incrementally infer a hint table from newline-delimited execution traces
+    InferOnline {
+        /// Path to a JSONL file containing one trace per line
         #[arg(long)]
         traces: PathBuf,
 
@@ -175,6 +195,17 @@ async fn main() {
             format,
             output,
         } => cmd_infer(
+            &traces,
+            fixed_slot_min_frequency,
+            &format,
+            output.as_deref(),
+        ),
+        Commands::InferOnline {
+            traces,
+            fixed_slot_min_frequency,
+            format,
+            output,
+        } => cmd_infer_online(
             &traces,
             fixed_slot_min_frequency,
             &format,
@@ -669,6 +700,46 @@ fn cmd_infer(
     let traces: Vec<TraceRecord> =
         serde_json::from_str(&traces_json).expect("Failed to parse traces JSON");
     let table = infer_from_traces_with_threshold(&traces, fixed_slot_min_frequency);
+    write_table(&table, fmt, output);
+}
+
+fn cmd_infer_online(
+    traces_path: &std::path::Path,
+    fixed_slot_min_frequency: f64,
+    fmt: &OutputFormat,
+    output: Option<&std::path::Path>,
+) {
+    let traces = fs::File::open(traces_path).expect("Failed to open traces file");
+    let mut learner = OnlineHintLearner::new(fixed_slot_min_frequency);
+    let mut observations = 0usize;
+    let started = Instant::now();
+    for (line_number, line) in BufReader::new(traces).lines().enumerate() {
+        let line = line.expect("Failed to read trace line");
+        if line.trim().is_empty() {
+            continue;
+        }
+        let trace: TraceRecord = serde_json::from_str(&line).unwrap_or_else(|error| {
+            panic!(
+                "Failed to parse trace JSON at line {}: {error}",
+                line_number + 1
+            )
+        });
+        learner.observe(&trace);
+        observations += 1;
+    }
+    let ingest_duration = started.elapsed();
+    let snapshot_started = Instant::now();
+    let table = learner.hint_table();
+    let snapshot_duration = snapshot_started.elapsed();
+
+    eprintln!(
+        "Learned from {} traces in {} groups with {} retained storage targets in {:?}; built snapshot in {:?}",
+        observations,
+        learner.group_count(),
+        learner.storage_target_count(),
+        ingest_duration,
+        snapshot_duration
+    );
     write_table(&table, fmt, output);
 }
 

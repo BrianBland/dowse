@@ -8,6 +8,7 @@ The `dowse` binary. See the top-level [README](../../README.md) for full CLI ref
 |---|---|
 | `generate` | Analyze bytecode and emit a hint table |
 | `infer` | Infer a hint table from recorded execution traces |
+| `infer-online` | Incrementally infer from newline-delimited traces |
 | `inspect` | Pretty-print a hint table with summary stats |
 | `validate` | Score hints against recorded traces |
 | `merge` | Merge multiple JSON hint tables |

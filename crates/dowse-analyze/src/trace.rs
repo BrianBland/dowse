@@ -4,6 +4,8 @@ use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, B256};
 use dowse_types::{HintTable, PrefetchItem, Selector, SlotExpression};
 
 const CONFIDENCE_Z_SCORE: f64 = 1.96;
+const MAPPING_ARGUMENT_COUNT: usize = 3;
+const MAPPING_BASE_SLOT_COUNT: usize = 10;
 
 /// A single recorded trace of a contract call.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -19,9 +21,184 @@ pub struct TraceRecord {
     pub storage_accesses: Vec<(Address, B256)>,
 }
 
-struct PreparedTrace<'a> {
-    trace: &'a TraceRecord,
-    storage_accesses: HashSet<(Address, B256)>,
+/// Incremental trace learner that can publish a hint-table snapshot without retaining calldata.
+///
+/// This learner is cumulative. A long-running or adversarially exposed consumer must impose
+/// retention and cardinality bounds before using it in a production process.
+#[derive(Debug)]
+pub struct OnlineHintLearner {
+    fixed_slot_min_frequency: f64,
+    groups: HashMap<(Address, Selector), InferenceGroup>,
+}
+
+#[derive(Debug, Default)]
+struct InferenceGroup {
+    observations: usize,
+    slot_counts: HashMap<(Address, B256), usize>,
+    calldata_checked: [usize; MAPPING_ARGUMENT_COUNT],
+    calldata_matches: [HashMap<(Address, u8), usize>; MAPPING_ARGUMENT_COUNT],
+    caller_checked: usize,
+    caller_matches: HashMap<(Address, u8), usize>,
+}
+
+impl OnlineHintLearner {
+    /// Creates a cumulative learner with the minimum frequency for concrete storage slots.
+    pub fn new(fixed_slot_min_frequency: f64) -> Self {
+        assert!(
+            fixed_slot_min_frequency > 0.0 && fixed_slot_min_frequency <= 1.0,
+            "fixed slot minimum frequency must be in (0, 1]"
+        );
+        Self {
+            fixed_slot_min_frequency,
+            groups: HashMap::new(),
+        }
+    }
+
+    /// Adds one completed call trace to the learner.
+    pub fn observe(&mut self, trace: &TraceRecord) {
+        let selector = if trace.calldata.len() >= 4 {
+            Some(FixedBytes::<4>::from_slice(&trace.calldata[..4]))
+        } else {
+            None
+        };
+        let group = self.groups.entry((trace.address, selector)).or_default();
+        group.observations += 1;
+
+        let storage_accesses = trace
+            .storage_accesses
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        for access in &storage_accesses {
+            *group.slot_counts.entry(*access).or_default() += 1;
+        }
+
+        for argument_index in 0..MAPPING_ARGUMENT_COUNT {
+            let offset = 4 + argument_index * 32;
+            let Some(key) = trace.calldata.get(offset..offset + 32) else {
+                continue;
+            };
+            group.calldata_checked[argument_index] += 1;
+            record_mapping_matches(
+                &storage_accesses,
+                key,
+                &mut group.calldata_matches[argument_index],
+            );
+        }
+
+        if let Some(caller) = trace.caller {
+            group.caller_checked += 1;
+            record_mapping_matches(
+                &storage_accesses,
+                caller.as_slice(),
+                &mut group.caller_matches,
+            );
+        }
+    }
+
+    /// Builds a hint table from every observation ingested so far.
+    pub fn hint_table(&self) -> HintTable {
+        let mut table = HintTable::new();
+        table.metadata.source = "online-trace-inference".into();
+
+        for ((address, selector), group) in &self.groups {
+            let items = group.infer_items(*address, self.fixed_slot_min_frequency);
+            if !items.is_empty() {
+                let code_hash = keccak256(address.as_slice());
+                table.insert(*address, code_hash, *selector, items);
+            }
+        }
+        table
+    }
+
+    /// Returns the number of observed address-selector groups.
+    pub fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// Returns the number of distinct concrete storage targets retained by the learner.
+    pub fn storage_target_count(&self) -> usize {
+        self.groups
+            .values()
+            .map(|group| group.slot_counts.len())
+            .sum()
+    }
+}
+
+impl InferenceGroup {
+    fn infer_items(&self, contract: Address, fixed_slot_min_frequency: f64) -> Vec<PrefetchItem> {
+        let threshold = (self.observations as f64 * fixed_slot_min_frequency).ceil() as usize;
+        let mut items = Vec::new();
+        let mut fixed_slots = HashSet::new();
+
+        for ((address, slot), count) in &self.slot_counts {
+            if *count >= threshold {
+                items.push(storage_item(
+                    contract,
+                    *address,
+                    SlotExpression::Concrete { value: *slot },
+                    conservative_confidence(*count, self.observations),
+                ));
+                fixed_slots.insert((*address, *slot));
+            }
+        }
+
+        let variable_addresses = self
+            .slot_counts
+            .keys()
+            .filter(|target| !fixed_slots.contains(target))
+            .map(|(address, _)| *address)
+            .collect::<HashSet<_>>();
+        if variable_addresses.is_empty() {
+            return items;
+        }
+
+        for argument_index in 0..MAPPING_ARGUMENT_COUNT {
+            let checked = self.calldata_checked[argument_index];
+            if checked == 0 {
+                continue;
+            }
+            let offset = 4 + argument_index * 32;
+            for address in &variable_addresses {
+                for base_index in 0..MAPPING_BASE_SLOT_COUNT as u8 {
+                    let matches = self.calldata_matches[argument_index]
+                        .get(&(*address, base_index))
+                        .copied()
+                        .unwrap_or_default();
+                    if matches * 2 >= checked {
+                        items.push(storage_item(
+                            contract,
+                            *address,
+                            mapping_expression(SlotExpression::CalldataWord { offset }, base_index),
+                            conservative_confidence(matches, checked),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if self.caller_checked > 0 {
+            for address in &variable_addresses {
+                for base_index in 0..MAPPING_BASE_SLOT_COUNT as u8 {
+                    let matches = self
+                        .caller_matches
+                        .get(&(*address, base_index))
+                        .copied()
+                        .unwrap_or_default();
+                    if matches * 2 >= self.caller_checked {
+                        items.push(storage_item(
+                            contract,
+                            *address,
+                            mapping_expression(SlotExpression::Caller, base_index),
+                            conservative_confidence(matches, self.caller_checked),
+                        ));
+                    }
+                }
+            }
+        }
+
+        items
+    }
 }
 
 /// Infer a `HintTable` from recorded execution traces.
@@ -38,236 +215,54 @@ pub fn infer_from_traces_with_threshold(
     traces: &[TraceRecord],
     fixed_slot_min_frequency: f64,
 ) -> HintTable {
-    assert!(
-        fixed_slot_min_frequency > 0.0 && fixed_slot_min_frequency <= 1.0,
-        "fixed slot minimum frequency must be in (0, 1]"
-    );
-    let mut table = HintTable::new();
-    table.metadata.source = "trace-inference".into();
-
-    // Group by (address, selector)
-    let mut grouped: HashMap<(Address, Selector), Vec<&TraceRecord>> = HashMap::new();
+    let mut learner = OnlineHintLearner::new(fixed_slot_min_frequency);
     for trace in traces {
-        let selector: Selector = if trace.calldata.len() >= 4 {
-            Some(FixedBytes::<4>::from_slice(&trace.calldata[..4]))
-        } else {
-            None
-        };
-        grouped
-            .entry((trace.address, selector))
-            .or_default()
-            .push(trace);
+        learner.observe(trace);
     }
-
-    for ((address, selector), traces) in &grouped {
-        let items = infer_items_for_group(*address, traces, fixed_slot_min_frequency);
-        if !items.is_empty() {
-            // Use keccak256(address) as synthetic code hash for trace-inferred hints
-            let code_hash = keccak256(address.as_slice());
-            table.insert(*address, code_hash, *selector, items);
-        }
-    }
-
+    let mut table = learner.hint_table();
+    table.metadata.source = "trace-inference".into();
     table
 }
 
-fn infer_items_for_group(
+fn storage_item(
     contract: Address,
-    traces: &[&TraceRecord],
-    fixed_slot_min_frequency: f64,
-) -> Vec<PrefetchItem> {
-    if traces.is_empty() {
-        return Vec::new();
+    address: Address,
+    slot: SlotExpression,
+    confidence: f64,
+) -> PrefetchItem {
+    if address == contract {
+        PrefetchItem::Storage { slot }.with_confidence(confidence)
+    } else {
+        PrefetchItem::ExternalStorage { address, slot }.with_confidence(confidence)
     }
-
-    let total = traces.len();
-    let mut items = Vec::new();
-    let traces = traces
-        .iter()
-        .map(|trace| PreparedTrace {
-            trace,
-            storage_accesses: trace.storage_accesses.iter().copied().collect(),
-        })
-        .collect::<Vec<_>>();
-
-    // Collect all (address, slot) pairs and count how often each appears
-    let mut slot_counts: HashMap<(Address, B256), usize> = HashMap::new();
-    for trace in &traces {
-        for access in &trace.storage_accesses {
-            *slot_counts.entry(*access).or_default() += 1;
-        }
-    }
-
-    let threshold = (total as f64 * fixed_slot_min_frequency).ceil() as usize;
-
-    let mut fixed_slots = HashSet::new();
-    for ((address, slot), count) in &slot_counts {
-        if *count >= threshold {
-            if *address == contract {
-                items.push(
-                    PrefetchItem::Storage {
-                        slot: SlotExpression::Concrete { value: *slot },
-                    }
-                    .with_confidence(conservative_confidence(*count, total)),
-                );
-            } else {
-                items.push(
-                    PrefetchItem::ExternalStorage {
-                        address: *address,
-                        slot: SlotExpression::Concrete { value: *slot },
-                    }
-                    .with_confidence(conservative_confidence(*count, total)),
-                );
-            }
-            fixed_slots.insert((*address, *slot));
-        }
-    }
-
-    // For variable slots (not fixed), try to derive mapping patterns
-    let variable_slots: Vec<_> = slot_counts
-        .keys()
-        .filter(|k| !fixed_slots.contains(k))
-        .cloned()
-        .collect();
-
-    if !variable_slots.is_empty() {
-        let mapping_items = try_infer_mappings(contract, &traces, &variable_slots);
-        items.extend(mapping_items);
-    }
-
-    items
 }
 
-/// Attempt to infer mapping base slots from variable storage accesses.
-fn try_infer_mappings(
-    contract: Address,
-    traces: &[PreparedTrace<'_>],
-    variable_slots: &[(Address, B256)],
-) -> Vec<PrefetchItem> {
-    let mut results = Vec::new();
-    let addresses: HashSet<Address> = variable_slots.iter().map(|(address, _)| *address).collect();
+fn mapping_expression(key: SlotExpression, base_index: u8) -> SlotExpression {
+    SlotExpression::Keccak256 {
+        inputs: vec![
+            key,
+            SlotExpression::Concrete {
+                value: B256::with_last_byte(base_index),
+            },
+        ],
+    }
+}
 
-    // Try common calldata offsets (4, 36, 68 = first 3 args including selector prefix)
-    for arg_idx in 0..3 {
-        let calldata_offset = 4 + arg_idx * 32;
-        let mut checked = 0usize;
-        let mut matches = HashMap::<(Address, u8), usize>::new();
-
-        for trace in traces {
-            let start = calldata_offset;
-            let end = start + 32;
-            let Some(key_bytes) = trace.trace.calldata.get(start..end) else {
-                continue;
-            };
-            checked += 1;
-            let expected_slots = std::array::from_fn::<_, 10, _>(|base_idx| {
-                keccak256_mapping(key_bytes, &B256::with_last_byte(base_idx as u8))
-            });
-            for (address, slot) in &trace.storage_accesses {
-                if !addresses.contains(address) {
-                    continue;
-                }
-                for (base_idx, expected_slot) in expected_slots.iter().enumerate() {
-                    if slot == expected_slot {
-                        *matches.entry((*address, base_idx as u8)).or_default() += 1;
-                    }
-                }
-            }
-        }
-
-        // Try common base slots (0..10)
-        for address in &addresses {
-            for base_idx in 0u8..10 {
-                let matches = matches
-                    .get(&(*address, base_idx))
-                    .copied()
-                    .unwrap_or_default();
-                // If >= 50% of traces match this pattern, emit it.
-                if checked > 0 && matches * 2 >= checked {
-                    let base_slot = B256::with_last_byte(base_idx);
-                    let slot = SlotExpression::Keccak256 {
-                        inputs: vec![
-                            SlotExpression::CalldataWord {
-                                offset: calldata_offset,
-                            },
-                            SlotExpression::Concrete { value: base_slot },
-                        ],
-                    };
-                    if *address == contract {
-                        results.push(
-                            PrefetchItem::Storage { slot }
-                                .with_confidence(conservative_confidence(matches, checked)),
-                        );
-                    } else {
-                        results.push(
-                            PrefetchItem::ExternalStorage {
-                                address: *address,
-                                slot,
-                            }
-                            .with_confidence(conservative_confidence(matches, checked)),
-                        );
-                    }
-                }
+fn record_mapping_matches(
+    storage_accesses: &HashSet<(Address, B256)>,
+    key: &[u8],
+    matches: &mut HashMap<(Address, u8), usize>,
+) {
+    let expected_slots = std::array::from_fn::<_, MAPPING_BASE_SLOT_COUNT, _>(|base_index| {
+        keccak256_mapping(key, &B256::with_last_byte(base_index as u8))
+    });
+    for (address, slot) in storage_accesses {
+        for (base_index, expected_slot) in expected_slots.iter().enumerate() {
+            if slot == expected_slot {
+                *matches.entry((*address, base_index as u8)).or_default() += 1;
             }
         }
     }
-
-    let mut checked = 0usize;
-    let mut matches = HashMap::<(Address, u8), usize>::new();
-    for trace in traces {
-        let Some(caller) = trace.trace.caller else {
-            continue;
-        };
-        checked += 1;
-        let expected_slots = std::array::from_fn::<_, 10, _>(|base_idx| {
-            keccak256_mapping(caller.as_slice(), &B256::with_last_byte(base_idx as u8))
-        });
-        for (address, slot) in &trace.storage_accesses {
-            if !addresses.contains(address) {
-                continue;
-            }
-            for (base_idx, expected_slot) in expected_slots.iter().enumerate() {
-                if slot == expected_slot {
-                    *matches.entry((*address, base_idx as u8)).or_default() += 1;
-                }
-            }
-        }
-    }
-
-    for address in &addresses {
-        for base_idx in 0u8..10 {
-            let base_slot = B256::with_last_byte(base_idx);
-            let matches = matches
-                .get(&(*address, base_idx))
-                .copied()
-                .unwrap_or_default();
-
-            if checked > 0 && matches * 2 >= checked {
-                let slot = SlotExpression::Keccak256 {
-                    inputs: vec![
-                        SlotExpression::Caller,
-                        SlotExpression::Concrete { value: base_slot },
-                    ],
-                };
-                if *address == contract {
-                    results.push(
-                        PrefetchItem::Storage { slot }
-                            .with_confidence(conservative_confidence(matches, checked)),
-                    );
-                } else {
-                    results.push(
-                        PrefetchItem::ExternalStorage {
-                            address: *address,
-                            slot,
-                        }
-                        .with_confidence(conservative_confidence(matches, checked)),
-                    );
-                }
-            }
-        }
-    }
-
-    results
 }
 
 fn conservative_confidence(successes: usize, trials: usize) -> f64 {
