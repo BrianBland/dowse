@@ -19,6 +19,11 @@ pub struct TraceRecord {
     pub storage_accesses: Vec<(Address, B256)>,
 }
 
+struct PreparedTrace<'a> {
+    trace: &'a TraceRecord,
+    storage_accesses: HashSet<(Address, B256)>,
+}
+
 /// Infer a `HintTable` from recorded execution traces.
 ///
 /// Groups traces by (contract, selector), then:
@@ -77,14 +82,19 @@ fn infer_items_for_group(
 
     let total = traces.len();
     let mut items = Vec::new();
+    let traces = traces
+        .iter()
+        .map(|trace| PreparedTrace {
+            trace,
+            storage_accesses: trace.storage_accesses.iter().copied().collect(),
+        })
+        .collect::<Vec<_>>();
 
     // Collect all (address, slot) pairs and count how often each appears
     let mut slot_counts: HashMap<(Address, B256), usize> = HashMap::new();
-    for trace in traces {
-        // Deduplicate within a single trace
-        let unique: HashSet<_> = trace.storage_accesses.iter().cloned().collect();
-        for access in unique {
-            *slot_counts.entry(access).or_default() += 1;
+    for trace in &traces {
+        for access in &trace.storage_accesses {
+            *slot_counts.entry(*access).or_default() += 1;
         }
     }
 
@@ -121,7 +131,7 @@ fn infer_items_for_group(
         .collect();
 
     if !variable_slots.is_empty() {
-        let mapping_items = try_infer_mappings(contract, traces, &variable_slots);
+        let mapping_items = try_infer_mappings(contract, &traces, &variable_slots);
         items.extend(mapping_items);
     }
 
@@ -131,52 +141,50 @@ fn infer_items_for_group(
 /// Attempt to infer mapping base slots from variable storage accesses.
 fn try_infer_mappings(
     contract: Address,
-    traces: &[&TraceRecord],
+    traces: &[PreparedTrace<'_>],
     variable_slots: &[(Address, B256)],
 ) -> Vec<PrefetchItem> {
     let mut results = Vec::new();
-    let mut found_targets: HashSet<(Address, usize, B256)> = HashSet::new();
-    let mut found_caller_targets: HashSet<(Address, B256)> = HashSet::new();
     let addresses: HashSet<Address> = variable_slots.iter().map(|(address, _)| *address).collect();
 
     // Try common calldata offsets (4, 36, 68 = first 3 args including selector prefix)
     for arg_idx in 0..3 {
         let calldata_offset = 4 + arg_idx * 32;
+        let mut checked = 0usize;
+        let mut matches = HashMap::<(Address, u8), usize>::new();
+
+        for trace in traces {
+            let start = calldata_offset;
+            let end = start + 32;
+            let Some(key_bytes) = trace.trace.calldata.get(start..end) else {
+                continue;
+            };
+            checked += 1;
+            let expected_slots = std::array::from_fn::<_, 10, _>(|base_idx| {
+                keccak256_mapping(key_bytes, &B256::with_last_byte(base_idx as u8))
+            });
+            for (address, slot) in &trace.storage_accesses {
+                if !addresses.contains(address) {
+                    continue;
+                }
+                for (base_idx, expected_slot) in expected_slots.iter().enumerate() {
+                    if slot == expected_slot {
+                        *matches.entry((*address, base_idx as u8)).or_default() += 1;
+                    }
+                }
+            }
+        }
 
         // Try common base slots (0..10)
         for address in &addresses {
             for base_idx in 0u8..10 {
-                let base_slot = B256::with_last_byte(base_idx);
-
-                let mut matches = 0usize;
-                let mut checked = 0usize;
-
-                for trace in traces {
-                    let cd = &trace.calldata;
-                    let start = calldata_offset;
-                    let end = start + 32;
-                    if cd.len() < end {
-                        continue;
-                    }
-                    checked += 1;
-
-                    let key_bytes = &cd[start..end];
-                    let expected_slot = keccak256_mapping(key_bytes, &base_slot);
-
-                    if trace
-                        .storage_accesses
-                        .iter()
-                        .any(|access| access == &(*address, expected_slot))
-                    {
-                        matches += 1;
-                    }
-                }
-
+                let matches = matches
+                    .get(&(*address, base_idx))
+                    .copied()
+                    .unwrap_or_default();
                 // If >= 50% of traces match this pattern, emit it.
-                if checked > 0
-                    && matches * 2 >= checked
-                    && found_targets.insert((*address, calldata_offset, base_slot))
-                {
+                if checked > 0 && matches * 2 >= checked {
+                    let base_slot = B256::with_last_byte(base_idx);
                     let slot = SlotExpression::Keccak256 {
                         inputs: vec![
                             SlotExpression::CalldataWord {
@@ -204,31 +212,37 @@ fn try_infer_mappings(
         }
     }
 
+    let mut checked = 0usize;
+    let mut matches = HashMap::<(Address, u8), usize>::new();
+    for trace in traces {
+        let Some(caller) = trace.trace.caller else {
+            continue;
+        };
+        checked += 1;
+        let expected_slots = std::array::from_fn::<_, 10, _>(|base_idx| {
+            keccak256_mapping(caller.as_slice(), &B256::with_last_byte(base_idx as u8))
+        });
+        for (address, slot) in &trace.storage_accesses {
+            if !addresses.contains(address) {
+                continue;
+            }
+            for (base_idx, expected_slot) in expected_slots.iter().enumerate() {
+                if slot == expected_slot {
+                    *matches.entry((*address, base_idx as u8)).or_default() += 1;
+                }
+            }
+        }
+    }
+
     for address in &addresses {
         for base_idx in 0u8..10 {
             let base_slot = B256::with_last_byte(base_idx);
-            let mut matches = 0usize;
-            let mut checked = 0usize;
+            let matches = matches
+                .get(&(*address, base_idx))
+                .copied()
+                .unwrap_or_default();
 
-            for trace in traces {
-                let Some(caller) = trace.caller else {
-                    continue;
-                };
-                checked += 1;
-                let expected_slot = keccak256_mapping(caller.as_slice(), &base_slot);
-                if trace
-                    .storage_accesses
-                    .iter()
-                    .any(|access| access == &(*address, expected_slot))
-                {
-                    matches += 1;
-                }
-            }
-
-            if checked > 0
-                && matches * 2 >= checked
-                && found_caller_targets.insert((*address, base_slot))
-            {
+            if checked > 0 && matches * 2 >= checked {
                 let slot = SlotExpression::Keccak256 {
                     inputs: vec![
                         SlotExpression::Caller,
