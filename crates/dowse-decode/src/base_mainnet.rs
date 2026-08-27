@@ -75,8 +75,14 @@ const BATCH_TRANSFER: [u8; 4] = [0x12, 0x51, 0x4b, 0xba];
 const HANDLE_OPS_V6: [u8; 4] = [0x1f, 0xad, 0x94, 0x8c];
 const HANDLE_OPS_PACKED: [u8; 4] = [0x76, 0x5e, 0x82, 0x7f];
 const ACCOUNT_EXECUTE: [u8; 4] = [0xb6, 0x1d, 0x27, 0xf6];
-const ACCOUNT_EXECUTE_WITH_MODE: [u8; 4] = [0x7b, 0xb3, 0x74, 0x28];
+const ACCOUNT_EXECUTE_USER_OP: [u8; 4] = [0x7b, 0xb3, 0x74, 0x28];
+const ACCOUNT_EXECUTE_USER_OP_WITH_ERROR: [u8; 4] = [0x54, 0x1d, 0x63, 0xc8];
 const ACCOUNT_EXECUTE_BATCH: [u8; 4] = [0x34, 0xfc, 0xd5, 0xbe];
+const ACCOUNT_EXECUTE_BATCH_ARRAYS: [u8; 4] = [0x47, 0xe1, 0xda, 0x2a];
+const ACCOUNT_EXECUTE_BATCH_ARRAYS_LEGACY: [u8; 4] = [0x00, 0x00, 0x46, 0x80];
+const ACCOUNT_EXECUTE_7579: [u8; 4] = [0xe9, 0xae, 0x5c, 0x53];
+const ACCOUNT_EXECUTE_TUPLE: [u8; 4] = [0x5c, 0x1c, 0x6d, 0xcd];
+const ACCOUNT_EXECUTE_4337_OPS: [u8; 4] = [0x26, 0xda, 0x7d, 0x88];
 const SURPLUS_SETTLE: [u8; 4] = [0x92, 0x66, 0x91, 0x41];
 const ALLOWANCE_HOLDER_EXEC: [u8; 4] = [0x22, 0x13, 0xbc, 0x0b];
 const SETTLER_EXECUTE: [u8; 4] = [0x1f, 0xff, 0x99, 0x1f];
@@ -488,26 +494,104 @@ impl BaseMainnetDecoder {
         let selector: [u8; 4] = calldata[..4].try_into().expect("length checked");
         let body = &calldata[4..];
         match selector {
-            ACCOUNT_EXECUTE | ACCOUNT_EXECUTE_WITH_MODE => {
-                let (Some(target), Some(child)) = (address_word(body, 0), bytes(body, 2)) else {
-                    return;
-                };
-                self.decode_call(plan, target, account, child, depth + 1);
+            ACCOUNT_EXECUTE => self.decode_account_call_tuple(plan, account, body, depth),
+            ACCOUNT_EXECUTE_USER_OP | ACCOUNT_EXECUTE_USER_OP_WITH_ERROR => {
+                if usize_word(body, 3) == Some(0) {
+                    self.decode_account_call_tuple(plan, account, body, depth);
+                }
             }
-            ACCOUNT_EXECUTE_BATCH => {
-                let Some(calls) = tuple_array(body, 0, MAX_INNER_CALLS) else {
+            ACCOUNT_EXECUTE_BATCH | ACCOUNT_EXECUTE_4337_OPS => {
+                self.decode_account_call_array(plan, account, body, depth);
+            }
+            ACCOUNT_EXECUTE_BATCH_ARRAYS | ACCOUNT_EXECUTE_BATCH_ARRAYS_LEGACY => {
+                let (Some(targets), Some(values), Some(children)) = (
+                    address_array(body, 0, MAX_INNER_CALLS),
+                    array(body, 1),
+                    bytes_array(body, 2, MAX_INNER_CALLS),
+                ) else {
                     return;
                 };
-                for call in calls {
-                    let (Some(target), Some(child)) = (address_word(call, 0), bytes(call, 2))
-                    else {
-                        continue;
+                if usize_word(values, 0) != Some(targets.len()) || children.len() != targets.len() {
+                    return;
+                }
+                for (target, child) in targets.into_iter().zip(children) {
+                    let target = if target == Address::ZERO {
+                        account
+                    } else {
+                        target
                     };
                     self.decode_call(plan, target, account, child, depth + 1);
                 }
             }
+            ACCOUNT_EXECUTE_7579 => self.decode_7579(plan, account, body, depth),
+            ACCOUNT_EXECUTE_TUPLE => {
+                if let Some(call) = array(body, 0) {
+                    self.decode_account_call_tuple(plan, account, call, depth);
+                }
+            }
             _ => {}
         }
+    }
+
+    fn decode_7579(&self, plan: &mut PlanAccumulator, account: Address, body: &[u8], depth: usize) {
+        let (Some(mode), Some(execution)) = (word(body, 0), bytes(body, 1)) else {
+            return;
+        };
+        let mode_selector = &mode[6..10];
+        match mode[0] {
+            0 if mode_selector == [0, 0, 0, 0] => {
+                let Some((target, child)) = execution
+                    .get(..20)
+                    .zip(execution.get(52..))
+                    .map(|(target, child)| (Address::from_slice(target), child))
+                else {
+                    return;
+                };
+                let target = if target == Address::ZERO {
+                    account
+                } else {
+                    target
+                };
+                self.decode_call(plan, target, account, child, depth + 1);
+            }
+            1 if mode_selector == [0, 0, 0, 0] || mode_selector == [0x78, 0x21, 0x00, 0x01] => {
+                self.decode_account_call_array(plan, account, execution, depth);
+            }
+            _ => {}
+        }
+    }
+
+    fn decode_account_call_array(
+        &self,
+        plan: &mut PlanAccumulator,
+        account: Address,
+        body: &[u8],
+        depth: usize,
+    ) {
+        let Some(calls) = tuple_array(body, 0, MAX_INNER_CALLS) else {
+            return;
+        };
+        for call in calls {
+            self.decode_account_call_tuple(plan, account, call, depth);
+        }
+    }
+
+    fn decode_account_call_tuple(
+        &self,
+        plan: &mut PlanAccumulator,
+        account: Address,
+        call: &[u8],
+        depth: usize,
+    ) {
+        let (Some(target), Some(child)) = (address_word(call, 0), bytes(call, 2)) else {
+            return;
+        };
+        let target = if target == Address::ZERO {
+            account
+        } else {
+            target
+        };
+        self.decode_call(plan, target, account, child, depth + 1);
     }
 
     fn decode_batch_transfers(&self, plan: &mut PlanAccumulator, executor: Address, body: &[u8]) {
@@ -1665,6 +1749,31 @@ mod tests {
             slot: nested_mapping_slot(USER.into_word(), PACKED_BATCH_TRANSFER.into_word(), 10),
         }));
         assert!(plan.storage.contains(&StorageTarget {
+            address: USDC,
+            slot: mapping_slot(RECIPIENT.into_word(), 9),
+        }));
+    }
+
+    #[test]
+    fn decodes_erc7579_packed_account_call() {
+        let child = calldata(TRANSFER, &[RECIPIENT.into_word(), B256::with_last_byte(1)]);
+        let payload_length = 20 + 32 + child.len();
+        let mut data = vec![0u8; 4 + 32 * 3 + payload_length.div_ceil(32) * 32];
+        data[..4].copy_from_slice(&ACCOUNT_EXECUTE_7579);
+        data[4 + 56..4 + 64].copy_from_slice(&64_u64.to_be_bytes());
+        data[4 + 88..4 + 96].copy_from_slice(&(payload_length as u64).to_be_bytes());
+        data[4 + 96..4 + 116].copy_from_slice(USDC.as_slice());
+        data[4 + 148..4 + 148 + child.len()].copy_from_slice(&child);
+        let mut plan = PlanAccumulator::default();
+
+        BaseMainnetDecoder::new(PlanLimits::new(32, 256))
+            .decode_account_call(&mut plan, USER, &data, 0);
+
+        assert!(plan.plan.storage.contains(&StorageTarget {
+            address: USDC,
+            slot: mapping_slot(USER.into_word(), 9),
+        }));
+        assert!(plan.plan.storage.contains(&StorageTarget {
             address: USDC,
             slot: mapping_slot(RECIPIENT.into_word(), 9),
         }));
