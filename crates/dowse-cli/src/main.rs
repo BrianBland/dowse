@@ -1016,6 +1016,10 @@ fn decoder_category(target: Address) -> &'static str {
         "Relay approval proxy"
     } else if target == address!("F94ef760884b0605E433853Aed17DA574160226E") {
         "Limitless fee module"
+    } else if target == address!("6131B5fae19EA4f9D964eAc0408E4408b66337b5") {
+        "KyberSwap router"
+    } else if target == address!("67d03631FE51B741C0C00c4E16eb662AC84381df") {
+        "OKX router"
     } else if target == address!("5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
         || target == address!("0000000071727De22E5E9d8BAf0edAc6f37da032")
         || target == address!("4337084D9E255Ff0702461CF8895CE9E3b5Ff108")
@@ -1023,6 +1027,7 @@ fn decoder_category(target: Address) -> &'static str {
         "EntryPoint"
     } else if target == address!("C3236716cbDC725b518AC0A5d830FBaDcfd05032")
         || target == address!("fA4071b58D87cBc7aF904F4C02F64318167655a2")
+        || target == address!("95562A1bDb6e3C94cB169346a5DA41ac7EfCD36c")
     {
         "batch transfers"
     } else {

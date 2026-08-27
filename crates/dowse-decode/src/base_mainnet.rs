@@ -25,6 +25,7 @@ const SLIPSTREAM_ROUTER: Address = address!("BE6D8f0d05cC4be24d5167a3eF062215bE6
 const SLIPSTREAM_ROUTER_2: Address = address!("cbBb8035cAc7D4B3Ca7aBb74cF7BdF900215Ce0D");
 const WORD_BATCH_TRANSFER: Address = address!("C3236716cbDC725b518AC0A5d830FBaDcfd05032");
 const PACKED_BATCH_TRANSFER: Address = address!("fA4071b58D87cBc7aF904F4C02F64318167655a2");
+const ABI_BATCH_TRANSFER: Address = address!("95562A1bDb6e3C94cB169346a5DA41ac7EfCD36c");
 const ENTRY_POINT_V6: Address = address!("5FF137D4b0FDCD49DcA30c7CF57E578a026d2789");
 const ENTRY_POINT_V7: Address = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
 const ENTRY_POINT_V8: Address = address!("4337084D9E255Ff0702461CF8895CE9E3b5Ff108");
@@ -33,6 +34,8 @@ const RELAY_APPROVAL_PROXY_V3: Address = address!("CcC88a9d1B4ED6b0EABA998850414
 const RELAY_ROUTER_V3: Address = address!("b92fe925DC43a0ECdE6c8b1a2709c170Ec4fFf4f");
 const LIMITLESS_FEE_MODULE: Address = address!("F94ef760884b0605E433853Aed17DA574160226E");
 const LIMITLESS_EXCHANGE: Address = address!("05c748E2f4DcDe0ec9Fa8DDc40DE6b867f923fa5");
+const KYBER_ROUTER: Address = address!("6131B5fae19EA4f9D964eAc0408E4408b66337b5");
+const OKX_ROUTER: Address = address!("67d03631FE51B741C0C00c4E16eb662AC84381df");
 const MSG_SENDER: Address = address!("0000000000000000000000000000000000000001");
 const ADDRESS_THIS: Address = address!("0000000000000000000000000000000000000002");
 const UNISWAP_V3_POOL_INIT_CODE_HASH: B256 = B256::new([
@@ -101,6 +104,8 @@ const SETTLER_POSITIVE_SLIPPAGE: [u8; 4] = [0x67, 0x03, 0x35, 0xbe];
 const SETTLER_BALANCER_V3: [u8; 4] = [0xfd, 0x8c, 0x38, 0xe1];
 const RELAY_PERMIT2_TRANSFER_AND_MULTICALL: [u8; 4] = [0x0a, 0x2b, 0x8f, 0x36];
 const LIMITLESS_MATCH_ORDERS: [u8; 4] = [0xd2, 0x53, 0x9b, 0x37];
+const KYBER_SWAP: [u8; 4] = [0xe2, 0x1f, 0xd0, 0xe9];
+const OKX_DAG_SWAP_BY_ORDER_ID: [u8; 4] = [0xf2, 0xc4, 0x26, 0x96];
 
 const LIKELY_CONFIDENCE: f64 = 0.9;
 const ROUTER_CONFIDENCE: f64 = 0.6;
@@ -158,6 +163,8 @@ impl BaseMainnetDecoder {
             && (target == WORD_BATCH_TRANSFER || target == PACKED_BATCH_TRANSFER)
         {
             self.decode_batch_transfers(plan, target, body);
+        } else if target == ABI_BATCH_TRANSFER && selector == TRANSFER {
+            self.decode_abi_batch_transfers(plan, body);
         } else if matches!(target, ENTRY_POINT_V6 | ENTRY_POINT_V7 | ENTRY_POINT_V8)
             && matches!(selector, HANDLE_OPS_V6 | HANDLE_OPS_PACKED)
         {
@@ -172,6 +179,113 @@ impl BaseMainnetDecoder {
             self.decode_relay_approval_proxy(plan, body, depth);
         } else if target == LIMITLESS_FEE_MODULE && selector == LIMITLESS_MATCH_ORDERS {
             self.decode_limitless_match_orders(plan, caller, body);
+        } else if target == KYBER_ROUTER && selector == KYBER_SWAP {
+            self.decode_kyber_swap(plan, caller, body, depth);
+        } else if target == OKX_ROUTER && selector == OKX_DAG_SWAP_BY_ORDER_ID {
+            self.decode_okx_swap(plan, caller, body);
+        }
+    }
+
+    fn decode_kyber_swap(
+        &self,
+        plan: &mut PlanAccumulator,
+        caller: Address,
+        body: &[u8],
+        depth: usize,
+    ) {
+        let Some(execution) = array(body, 0) else {
+            return;
+        };
+        let (Some(call_target), Some(approve_target), Some(target_data), Some(description)) = (
+            address_word(execution, 0),
+            address_word(execution, 1),
+            bytes(execution, 2),
+            array(execution, 3),
+        ) else {
+            return;
+        };
+        let (Some(source_token), Some(destination_token), Some(destination_receiver)) = (
+            address_word(description, 0),
+            address_word(description, 1),
+            address_word(description, 6),
+        ) else {
+            return;
+        };
+
+        plan.account(KYBER_ROUTER);
+        plan.account_with_confidence(call_target, ROUTER_CONFIDENCE);
+        plan.account_with_confidence(approve_target, ROUTER_CONFIDENCE);
+        plan.balance_with_confidence(source_token, caller, LIKELY_CONFIDENCE);
+        plan.spend_allowance_with_confidence(source_token, caller, KYBER_ROUTER, LIKELY_CONFIDENCE);
+        plan.balance_with_confidence(source_token, KYBER_ROUTER, ROUTER_CONFIDENCE);
+        plan.balance_with_confidence(source_token, call_target, ROUTER_CONFIDENCE);
+        plan.allowance_with_confidence(
+            source_token,
+            KYBER_ROUTER,
+            approve_target,
+            ROUTER_CONFIDENCE,
+        );
+        plan.balance_with_confidence(destination_token, destination_receiver, LIKELY_CONFIDENCE);
+        plan.balance_with_confidence(destination_token, call_target, ROUTER_CONFIDENCE);
+        plan.balance_with_confidence(destination_token, KYBER_ROUTER, ROUTER_CONFIDENCE);
+
+        if let Some(receivers) = address_array(description, 2, MAX_INNER_CALLS) {
+            for receiver in receivers {
+                plan.balance_with_confidence(source_token, receiver, ROUTER_CONFIDENCE);
+            }
+        }
+        if let Some(receivers) = address_array(description, 4, MAX_INNER_CALLS) {
+            for receiver in receivers {
+                plan.balance_with_confidence(destination_token, receiver, ROUTER_CONFIDENCE);
+            }
+        }
+        self.decode_call(plan, call_target, KYBER_ROUTER, target_data, depth + 1);
+    }
+
+    fn decode_okx_swap(&self, plan: &mut PlanAccumulator, caller: Address, body: &[u8]) {
+        let (Some(source_token), Some(destination_token)) =
+            (address_word(body, 1), address_word(body, 2))
+        else {
+            return;
+        };
+
+        plan.account(OKX_ROUTER);
+        plan.balance_with_confidence(source_token, caller, LIKELY_CONFIDENCE);
+        plan.balance_with_confidence(source_token, OKX_ROUTER, ROUTER_CONFIDENCE);
+        plan.balance_with_confidence(destination_token, caller, LIKELY_CONFIDENCE);
+        plan.balance_with_confidence(destination_token, OKX_ROUTER, ROUTER_CONFIDENCE);
+
+        let Some(paths) = tuple_array(body, 6, MAX_INNER_CALLS) else {
+            return;
+        };
+        for path in paths {
+            let Some(path_token) = address_word(path, 4) else {
+                continue;
+            };
+            if let Some(adapters) = address_array(path, 0, MAX_INNER_CALLS) {
+                for adapter in adapters {
+                    plan.account_with_confidence(adapter, AGGREGATOR_CONFIDENCE);
+                }
+            }
+            if let Some(receivers) = address_array(path, 1, MAX_INNER_CALLS) {
+                for receiver in receivers {
+                    plan.balance_with_confidence(path_token, receiver, ROUTER_CONFIDENCE);
+                }
+            }
+            let Some(raw_data) = array(path, 2) else {
+                continue;
+            };
+            let Some(length) = usize_word(raw_data, 0).map(|value| value.min(MAX_INNER_CALLS))
+            else {
+                continue;
+            };
+            for index in 0..length {
+                let Some(pool) = address_word(raw_data, index + 1) else {
+                    break;
+                };
+                plan.account_with_confidence(pool, AGGREGATOR_CONFIDENCE);
+                plan.balance_with_confidence(path_token, pool, AGGREGATOR_CONFIDENCE);
+            }
         }
     }
 
@@ -637,6 +751,38 @@ impl BaseMainnetDecoder {
                 plan.balance(token, recipient);
                 plan.spend_allowance(token, owner, executor);
             }
+        }
+    }
+
+    fn decode_abi_batch_transfers(&self, plan: &mut PlanAccumulator, body: &[u8]) {
+        let Some(records) = array(body, 2) else {
+            return;
+        };
+        let Some(count) = usize_word(records, 0).map(|value| value.min(MAX_INNER_CALLS)) else {
+            return;
+        };
+        let Some(records) = records.get(32..) else {
+            return;
+        };
+        let Some(required_length) = count.checked_mul(256) else {
+            return;
+        };
+        if records.len() < required_length {
+            return;
+        }
+
+        plan.account(ABI_BATCH_TRANSFER);
+        for record in records.chunks_exact(256).take(count) {
+            let (Some(owner), Some(token), Some(recipient)) = (
+                address_word(record, 0),
+                address_word(record, 1),
+                address_word(record, 2),
+            ) else {
+                continue;
+            };
+            plan.balance_with_confidence(token, owner, LIKELY_CONFIDENCE);
+            plan.balance_with_confidence(token, recipient, LIKELY_CONFIDENCE);
+            plan.balance_with_confidence(token, ABI_BATCH_TRANSFER, LIKELY_CONFIDENCE);
         }
     }
 
@@ -1755,6 +1901,36 @@ mod tests {
     }
 
     #[test]
+    fn decodes_abi_batch_token_transfers() {
+        let mut data = vec![0u8; 4 + 32 * 12];
+        data[..4].copy_from_slice(&TRANSFER);
+        data[4 + 88..4 + 96].copy_from_slice(&96_u64.to_be_bytes());
+        data[4 + 120..4 + 128].copy_from_slice(&1_u64.to_be_bytes());
+        data[4 + 140..4 + 160].copy_from_slice(USER.as_slice());
+        data[4 + 172..4 + 192].copy_from_slice(USDC.as_slice());
+        data[4 + 204..4 + 224].copy_from_slice(RECIPIENT.as_slice());
+
+        let plan = BaseMainnetDecoder::new(PlanLimits::new(32, 256)).decode(
+            ABI_BATCH_TRANSFER,
+            Address::repeat_byte(0x33),
+            &data,
+        );
+
+        assert!(plan.storage.contains(&StorageTarget {
+            address: USDC,
+            slot: mapping_slot(USER.into_word(), 9),
+        }));
+        assert!(plan.storage.contains(&StorageTarget {
+            address: USDC,
+            slot: mapping_slot(ABI_BATCH_TRANSFER.into_word(), 9),
+        }));
+        assert!(plan.storage.contains(&StorageTarget {
+            address: USDC,
+            slot: mapping_slot(RECIPIENT.into_word(), 9),
+        }));
+    }
+
+    #[test]
     fn decodes_erc7579_packed_account_call() {
         let child = calldata(TRANSFER, &[RECIPIENT.into_word(), B256::with_last_byte(1)]);
         let payload_length = 20 + 32 + child.len();
@@ -1776,6 +1952,57 @@ mod tests {
         assert!(plan.plan.storage.contains(&StorageTarget {
             address: USDC,
             slot: mapping_slot(RECIPIENT.into_word(), 9),
+        }));
+    }
+
+    #[test]
+    fn decodes_kyber_swap_token_owners() {
+        let call_target = Address::repeat_byte(0x44);
+        let approve_target = Address::repeat_byte(0x55);
+        let mut data = vec![0u8; 4 + 32 + 576];
+        data[..4].copy_from_slice(&KYBER_SWAP);
+        data[28..36].copy_from_slice(&32_u64.to_be_bytes());
+        let execution = &mut data[36..];
+        execution[12..32].copy_from_slice(call_target.as_slice());
+        execution[44..64].copy_from_slice(approve_target.as_slice());
+        execution[88..96].copy_from_slice(&512_u64.to_be_bytes());
+        execution[120..128].copy_from_slice(&160_u64.to_be_bytes());
+        execution[152..160].copy_from_slice(&544_u64.to_be_bytes());
+        execution[172..192].copy_from_slice(USDC.as_slice());
+        execution[204..224].copy_from_slice(WETH.as_slice());
+        execution[364..384].copy_from_slice(RECIPIENT.as_slice());
+
+        let plan =
+            BaseMainnetDecoder::new(PlanLimits::new(32, 256)).decode(KYBER_ROUTER, USER, &data);
+
+        assert!(plan.storage.contains(&StorageTarget {
+            address: USDC,
+            slot: mapping_slot(USER.into_word(), 9),
+        }));
+        assert!(plan.storage.contains(&StorageTarget {
+            address: WETH,
+            slot: mapping_slot(RECIPIENT.into_word(), 3),
+        }));
+    }
+
+    #[test]
+    fn decodes_okx_swap_token_owners() {
+        let mut data = vec![0u8; 4 + 32 * 8];
+        data[..4].copy_from_slice(&OKX_DAG_SWAP_BY_ORDER_ID);
+        data[48..68].copy_from_slice(USDC.as_slice());
+        data[80..100].copy_from_slice(WETH.as_slice());
+        data[4 + 216..4 + 224].copy_from_slice(&224_u64.to_be_bytes());
+
+        let plan =
+            BaseMainnetDecoder::new(PlanLimits::new(32, 256)).decode(OKX_ROUTER, USER, &data);
+
+        assert!(plan.storage.contains(&StorageTarget {
+            address: USDC,
+            slot: mapping_slot(USER.into_word(), 9),
+        }));
+        assert!(plan.storage.contains(&StorageTarget {
+            address: WETH,
+            slot: mapping_slot(USER.into_word(), 3),
         }));
     }
 
