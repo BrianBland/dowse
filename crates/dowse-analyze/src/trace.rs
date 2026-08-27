@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, B256};
 use dowse_types::{HintTable, PrefetchItem, Selector, SlotExpression};
 
+const CONFIDENCE_Z_SCORE: f64 = 1.96;
+
 /// A single recorded trace of a contract call.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TraceRecord {
@@ -96,7 +98,7 @@ fn infer_items_for_group(
                     PrefetchItem::Storage {
                         slot: SlotExpression::Concrete { value: *slot },
                     }
-                    .with_confidence(*count as f64 / total as f64),
+                    .with_confidence(conservative_confidence(*count, total)),
                 );
             } else {
                 items.push(
@@ -104,7 +106,7 @@ fn infer_items_for_group(
                         address: *address,
                         slot: SlotExpression::Concrete { value: *slot },
                     }
-                    .with_confidence(*count as f64 / total as f64),
+                    .with_confidence(conservative_confidence(*count, total)),
                 );
             }
             fixed_slots.insert((*address, *slot));
@@ -186,7 +188,7 @@ fn try_infer_mappings(
                     if *address == contract {
                         results.push(
                             PrefetchItem::Storage { slot }
-                                .with_confidence(matches as f64 / checked as f64),
+                                .with_confidence(conservative_confidence(matches, checked)),
                         );
                     } else {
                         results.push(
@@ -194,7 +196,7 @@ fn try_infer_mappings(
                                 address: *address,
                                 slot,
                             }
-                            .with_confidence(matches as f64 / checked as f64),
+                            .with_confidence(conservative_confidence(matches, checked)),
                         );
                     }
                 }
@@ -236,7 +238,7 @@ fn try_infer_mappings(
                 if *address == contract {
                     results.push(
                         PrefetchItem::Storage { slot }
-                            .with_confidence(matches as f64 / checked as f64),
+                            .with_confidence(conservative_confidence(matches, checked)),
                     );
                 } else {
                     results.push(
@@ -244,7 +246,7 @@ fn try_infer_mappings(
                             address: *address,
                             slot,
                         }
-                        .with_confidence(matches as f64 / checked as f64),
+                        .with_confidence(conservative_confidence(matches, checked)),
                     );
                 }
             }
@@ -252,6 +254,19 @@ fn try_infer_mappings(
     }
 
     results
+}
+
+fn conservative_confidence(successes: usize, trials: usize) -> f64 {
+    if trials == 0 {
+        return 0.0;
+    }
+    let trials = trials as f64;
+    let observed = successes as f64 / trials;
+    let z_squared = CONFIDENCE_Z_SCORE * CONFIDENCE_Z_SCORE;
+    let center = observed + z_squared / (2.0 * trials);
+    let margin = CONFIDENCE_Z_SCORE
+        * ((observed * (1.0 - observed) + z_squared / (4.0 * trials)) / trials).sqrt();
+    (center - margin) / (1.0 + z_squared / trials)
 }
 
 /// Compute keccak256(left_pad_32(key) ++ base_slot) for mapping slot derivation.
@@ -470,6 +485,14 @@ mod tests {
                 )
             })
             .expect("conditional slot should meet the configured threshold");
-        assert_eq!(conditional.scored().1, 0.4);
+        assert!(conditional.scored().1 < 0.4);
+        assert!(conditional.scored().1 > 0.05);
+    }
+
+    #[test]
+    fn confidence_penalizes_small_samples() {
+        assert!(conservative_confidence(1, 1) < conservative_confidence(5, 5));
+        assert!(conservative_confidence(5, 5) < conservative_confidence(50, 50));
+        assert!(conservative_confidence(0, 0) == 0.0);
     }
 }

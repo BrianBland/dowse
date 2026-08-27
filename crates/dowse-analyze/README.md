@@ -35,7 +35,8 @@ Each emitted item retains the analyzer's selector confidence.
 execution data. `infer_from_traces_with_threshold` allows trading additional concrete-slot
 coverage for speculative reads. This is useful when bytecode analysis alone doesn't capture
 all accessed slots (e.g. behind complex dispatch logic).
-Emitted items carry their observed frequency or mapping-match ratio as confidence.
+Emitted items carry the 95% Wilson lower bound of their observed frequency or mapping-match ratio
+as confidence, so a pattern seen once is ranked below one confirmed over many calls.
 
 Algorithm per `(address, selector)` group:
 1. **Fixed slots** — slots appearing in ≥80% of traces → `Concrete` items.
