@@ -162,6 +162,9 @@ dowse convert --input FILE --from json --to binary [--output FILE]
 
 // Load account info for an address computed from storage at runtime
 { "kind": "ComputedAccount", "address": <SlotExpression>, "selector": "0x70a08231" }
+
+// Attach an access-probability estimate while keeping legacy unscored items valid
+{ "kind": "Scored", "confidence": 0.8, "item": <PrefetchItem> }
 ```
 
 ### SlotExpression types
@@ -179,7 +182,7 @@ dowse convert --input FILE --from json --to binary [--output FILE]
 
 Compact encoding for hot paths. Each entry: `[32B code_hash][4B selector][1B count][items...]`.
 
-Item tags: `0x01` Account, `0x02` Storage, `0x03` ComputedAccount, `0x04` Account+selector, `0x05` ComputedAccount+selector.
+Item tags: `0x01` Account, `0x02` Storage, `0x03` ComputedAccount, `0x04` Account+selector, `0x05` ComputedAccount+selector, `0x06` ExternalStorage, `0x07` Scored.
 
 SlotExpression tags: `0x01` Concrete, `0x02` CalldataWord, `0x03` Caller, `0x04` Keccak256, `0x05` Add, `0x06` SLoad.
 

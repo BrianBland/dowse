@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-use alloy_primitives::{Address, B256, FixedBytes};
+use alloy_primitives::{Address, FixedBytes, B256};
 use dowse_types::{HintTable, PrefetchItem, SlotExpression};
 
 // ─── Human-readable format ──────────────────────────────────────────────────
@@ -18,19 +18,25 @@ const BLUE: &str = "\x1b[34m";
 /// Sort key for deterministic item ordering: Storage < Account < ComputedAccount,
 /// then by formatted representation within each category.
 fn item_sort_key(item: &PrefetchItem) -> (u8, String) {
+    let (item, _) = item.scored();
     match item {
         PrefetchItem::Storage { slot } => (0, format_slot_expr(slot)),
         PrefetchItem::ExternalStorage { address, slot } => {
             (1, format!("{address}{}", format_slot_expr(slot)))
         }
         PrefetchItem::Account { address, selector } => {
-            let sel_str = selector.map(|s| format!("0x{}", hex::encode(s))).unwrap_or_default();
+            let sel_str = selector
+                .map(|s| format!("0x{}", hex::encode(s)))
+                .unwrap_or_default();
             (2, format!("{address}{sel_str}"))
         }
         PrefetchItem::ComputedAccount { address, selector } => {
-            let sel_str = selector.map(|s| format!("0x{}", hex::encode(s))).unwrap_or_default();
+            let sel_str = selector
+                .map(|s| format!("0x{}", hex::encode(s)))
+                .unwrap_or_default();
             (3, format!("{}{sel_str}", format_slot_expr(address)))
         }
+        PrefetchItem::Scored { .. } => unreachable!("scored() removes wrappers"),
     }
 }
 
@@ -38,10 +44,15 @@ pub fn write_human(table: &HintTable, w: &mut impl Write) -> io::Result<()> {
     let sorted_hashes = table.sorted_code_hashes();
     for code_hash in &sorted_hashes {
         let sel_map = &table.entries[code_hash];
-        writeln!(w, "{DIM}0x{}{RESET} {DIM}(code hash){RESET}", hex::encode(code_hash))?;
+        writeln!(
+            w,
+            "{DIM}0x{}{RESET} {DIM}(code hash){RESET}",
+            hex::encode(code_hash)
+        )?;
         let addrs = table.addresses_for_hash(code_hash);
         if !addrs.is_empty() {
-            let addr_strs: Vec<String> = addrs.iter().map(|a| format!("{CYAN}{a}{RESET}")).collect();
+            let addr_strs: Vec<String> =
+                addrs.iter().map(|a| format!("{CYAN}{a}{RESET}")).collect();
             writeln!(w, "  addresses: {}", addr_strs.join(", "))?;
         }
         let mut sels: Vec<&dowse_types::Selector> = sel_map.keys().collect();
@@ -63,6 +74,10 @@ pub fn write_human(table: &HintTable, w: &mut impl Write) -> io::Result<()> {
             sorted_items.sort_by(|a, b| item_sort_key(a).cmp(&item_sort_key(b)));
 
             for item in sorted_items {
+                let (item, confidence) = item.scored();
+                if confidence < 1.0 {
+                    write!(w, "    {DIM}[{confidence:.3}]{RESET} ")?;
+                }
                 match item {
                     PrefetchItem::Storage { slot } => {
                         writeln!(w, "    {GREEN}{}{RESET}", format_slot_expr(slot))?;
@@ -74,18 +89,35 @@ pub fn write_human(table: &HintTable, w: &mut impl Write) -> io::Result<()> {
                             format_slot_expr(slot)
                         )?;
                     }
-                    PrefetchItem::Account { address, selector: Some(sel) } => {
+                    PrefetchItem::Account {
+                        address,
+                        selector: Some(sel),
+                    } => {
                         writeln!(w, "    {BLUE}account{RESET}({CYAN}{address}{RESET}, {MAGENTA}0x{}{RESET})", hex::encode(sel))?;
                     }
-                    PrefetchItem::Account { address, selector: None } => {
+                    PrefetchItem::Account {
+                        address,
+                        selector: None,
+                    } => {
                         writeln!(w, "    {BLUE}account{RESET}({CYAN}{address}{RESET})")?;
                     }
-                    PrefetchItem::ComputedAccount { address, selector: Some(sel) } => {
+                    PrefetchItem::ComputedAccount {
+                        address,
+                        selector: Some(sel),
+                    } => {
                         writeln!(w, "    {MAGENTA}computed_account{RESET}({GREEN}{}{RESET}, {MAGENTA}0x{}{RESET})", format_slot_expr(address), hex::encode(sel))?;
                     }
-                    PrefetchItem::ComputedAccount { address, selector: None } => {
-                        writeln!(w, "    {MAGENTA}computed_account{RESET}({GREEN}{}{RESET})", format_slot_expr(address))?;
+                    PrefetchItem::ComputedAccount {
+                        address,
+                        selector: None,
+                    } => {
+                        writeln!(
+                            w,
+                            "    {MAGENTA}computed_account{RESET}({GREEN}{}{RESET})",
+                            format_slot_expr(address)
+                        )?;
                     }
+                    PrefetchItem::Scored { .. } => unreachable!("scored() removes wrappers"),
                 }
             }
         }
@@ -131,6 +163,7 @@ pub fn format_slot_expr(expr: &SlotExpression) -> String {
 //   0x04 = Account (with selector): [20B address][4B selector]
 //   0x05 = ComputedAccount (with selector): [encoded SlotExpression][4B selector]
 //   0x06 = ExternalStorage: [20B address][encoded SlotExpression]
+//   0x07 = Scored: [8B confidence f64 big-endian][encoded PrefetchItem]
 //
 // SlotExpression encoding (1-byte tag + payload):
 //   0x01 Concrete: [32B value]
@@ -189,11 +222,22 @@ pub fn write_binary(table: &HintTable, w: &mut impl Write) -> io::Result<()> {
 
 fn write_binary_item(item: &PrefetchItem, w: &mut impl Write) -> io::Result<()> {
     match item {
-        PrefetchItem::Account { address, selector: None } => {
+        PrefetchItem::Scored { confidence, item } => {
+            w.write_all(&[0x07])?;
+            w.write_all(&confidence.to_be_bytes())?;
+            write_binary_item(item, w)?;
+        }
+        PrefetchItem::Account {
+            address,
+            selector: None,
+        } => {
             w.write_all(&[0x01])?;
             w.write_all(address.as_slice())?;
         }
-        PrefetchItem::Account { address, selector: Some(sel) } => {
+        PrefetchItem::Account {
+            address,
+            selector: Some(sel),
+        } => {
             w.write_all(&[0x04])?;
             w.write_all(address.as_slice())?;
             w.write_all(sel.as_slice())?;
@@ -207,11 +251,17 @@ fn write_binary_item(item: &PrefetchItem, w: &mut impl Write) -> io::Result<()> 
             w.write_all(address.as_slice())?;
             write_binary_slot_expr(slot, w)?;
         }
-        PrefetchItem::ComputedAccount { address, selector: None } => {
+        PrefetchItem::ComputedAccount {
+            address,
+            selector: None,
+        } => {
             w.write_all(&[0x03])?;
             write_binary_slot_expr(address, w)?;
         }
-        PrefetchItem::ComputedAccount { address, selector: Some(sel) } => {
+        PrefetchItem::ComputedAccount {
+            address,
+            selector: Some(sel),
+        } => {
             w.write_all(&[0x05])?;
             write_binary_slot_expr(address, w)?;
             w.write_all(sel.as_slice())?;
@@ -321,6 +371,17 @@ fn read_binary_item(data: &[u8], cursor: &mut usize) -> io::Result<PrefetchItem>
     *cursor += 1;
 
     match tag {
+        0x07 => {
+            if *cursor + 8 > data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated confidence",
+                ));
+            }
+            let confidence = f64::from_be_bytes(data[*cursor..*cursor + 8].try_into().unwrap());
+            *cursor += 8;
+            Ok(read_binary_item(data, cursor)?.with_confidence(confidence))
+        }
         0x01 => {
             // Account (no selector)
             if *cursor + 20 > data.len() {
@@ -331,7 +392,10 @@ fn read_binary_item(data: &[u8], cursor: &mut usize) -> io::Result<PrefetchItem>
             }
             let address = Address::from_slice(&data[*cursor..*cursor + 20]);
             *cursor += 20;
-            Ok(PrefetchItem::Account { address, selector: None })
+            Ok(PrefetchItem::Account {
+                address,
+                selector: None,
+            })
         }
         0x04 => {
             // Account with selector
@@ -355,7 +419,10 @@ fn read_binary_item(data: &[u8], cursor: &mut usize) -> io::Result<PrefetchItem>
         0x03 => {
             // ComputedAccount (no selector)
             let address = read_binary_slot_expr(data, cursor)?;
-            Ok(PrefetchItem::ComputedAccount { address, selector: None })
+            Ok(PrefetchItem::ComputedAccount {
+                address,
+                selector: None,
+            })
         }
         0x05 => {
             // ComputedAccount (with selector)
@@ -453,9 +520,7 @@ fn read_binary_slot_expr(data: &[u8], cursor: &mut usize) -> io::Result<SlotExpr
         0x06 => {
             // SLoad
             let key = read_binary_slot_expr(data, cursor)?;
-            Ok(SlotExpression::SLoad {
-                key: Box::new(key),
-            })
+            Ok(SlotExpression::SLoad { key: Box::new(key) })
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -482,7 +547,10 @@ mod tests {
             DUMMY_HASH,
             Some(FixedBytes::from([0xa9, 0x05, 0x9c, 0xbb])),
             vec![
-                PrefetchItem::Account { address: target, selector: None },
+                PrefetchItem::Account {
+                    address: target,
+                    selector: None,
+                },
                 PrefetchItem::Account {
                     address: target,
                     selector: Some(FixedBytes::from([0xd0, 0xe3, 0x0d, 0xb0])),
@@ -496,7 +564,8 @@ mod tests {
                             },
                         ],
                     },
-                },
+                }
+                .with_confidence(0.625),
                 PrefetchItem::Storage {
                     slot: SlotExpression::Caller,
                 },
@@ -544,8 +613,13 @@ mod tests {
         let sel = Some(FixedBytes::from([0xa9, 0x05, 0x9c, 0xbb]));
         let items = restored.lookup(addr, sel).unwrap();
         assert_eq!(items.len(), 7);
-        assert!(matches!(&items[0], PrefetchItem::Account { address, selector: None } if *address == target));
-        assert!(matches!(&items[1], PrefetchItem::Account { address, selector: Some(_) } if *address == target));
+        assert!(
+            matches!(&items[0], PrefetchItem::Account { address, selector: None } if *address == target)
+        );
+        assert!(
+            matches!(&items[1], PrefetchItem::Account { address, selector: Some(_) } if *address == target)
+        );
+        assert_eq!(items[2].scored().1, 0.625);
         assert!(matches!(&items[6], PrefetchItem::ComputedAccount { .. }));
     }
 
@@ -679,7 +753,9 @@ mod tests {
         assert_eq!(table.selector_count(), restored.selector_count());
         assert_eq!(table.item_count(), restored.item_count());
 
-        let items = restored.lookup(addr, Some(FixedBytes::from([0x02, 0x2c, 0x0d, 0x9f]))).unwrap();
+        let items = restored
+            .lookup(addr, Some(FixedBytes::from([0x02, 0x2c, 0x0d, 0x9f])))
+            .unwrap();
         assert_eq!(items.len(), 2);
         // First item: ComputedAccount with selector (tag 0x05)
         assert!(matches!(

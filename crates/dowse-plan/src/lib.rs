@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use alloy_primitives::{keccak256, Address, B256, U256};
 use dowse_types::{HintTable, PrefetchItem, SlotExpression};
@@ -45,12 +45,16 @@ pub struct PlanDiagnostics {
 }
 
 /// Concrete, bounded state targets for one transaction.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PrefetchPlan {
     /// Accounts to load. Consumers may also load bytecode referenced by each account.
     pub accounts: Vec<Address>,
     /// Storage slots to load.
     pub storage: Vec<StorageTarget>,
+    /// Confidence scores parallel to [`Self::accounts`].
+    pub account_confidence: Vec<f64>,
+    /// Confidence scores parallel to [`Self::storage`].
+    pub storage_confidence: Vec<f64>,
     /// Resolution diagnostics.
     pub diagnostics: PlanDiagnostics,
 }
@@ -86,13 +90,20 @@ impl<'a> PrefetchPlanner<'a> {
         let items = self.hints.lookup(target, selector)?;
         let context = ResolutionContext { calldata, caller };
         let mut plan = PrefetchPlan::default();
-        let mut accounts = HashSet::new();
-        let mut storage = HashSet::new();
+        let mut accounts = HashMap::new();
+        let mut storage = HashMap::new();
 
         for item in items {
+            let (item, confidence) = item.scored();
             match item {
                 PrefetchItem::Account { address, .. } => {
-                    push_account(&mut plan, &mut accounts, *address, self.limits.accounts);
+                    push_account(
+                        &mut plan,
+                        &mut accounts,
+                        *address,
+                        confidence,
+                        self.limits.accounts,
+                    );
                 }
                 PrefetchItem::Storage { slot } => {
                     let Some(slot) = resolve_expression(slot, &context) else {
@@ -106,11 +117,18 @@ impl<'a> PrefetchPlanner<'a> {
                             address: target,
                             slot,
                         },
+                        confidence,
                         self.limits.storage_slots,
                     );
                 }
                 PrefetchItem::ExternalStorage { address, slot } => {
-                    push_account(&mut plan, &mut accounts, *address, self.limits.accounts);
+                    push_account(
+                        &mut plan,
+                        &mut accounts,
+                        *address,
+                        confidence,
+                        self.limits.accounts,
+                    );
                     let Some(slot) = resolve_expression(slot, &context) else {
                         plan.diagnostics.unresolved_items += 1;
                         continue;
@@ -122,6 +140,7 @@ impl<'a> PrefetchPlanner<'a> {
                             address: *address,
                             slot,
                         },
+                        confidence,
                         self.limits.storage_slots,
                     );
                 }
@@ -134,9 +153,11 @@ impl<'a> PrefetchPlanner<'a> {
                         &mut plan,
                         &mut accounts,
                         Address::from_word(address),
+                        confidence,
                         self.limits.accounts,
                     );
                 }
+                PrefetchItem::Scored { .. } => unreachable!("scored() removes wrappers"),
             }
         }
 
@@ -146,33 +167,39 @@ impl<'a> PrefetchPlanner<'a> {
 
 fn push_account(
     plan: &mut PrefetchPlan,
-    seen: &mut HashSet<Address>,
+    seen: &mut HashMap<Address, usize>,
     address: Address,
+    confidence: f64,
     limit: usize,
 ) {
-    if seen.contains(&address) {
+    if let Some(index) = seen.get(&address) {
         plan.diagnostics.duplicate_items += 1;
+        plan.account_confidence[*index] = plan.account_confidence[*index].max(confidence);
     } else if plan.accounts.len() == limit {
         plan.diagnostics.truncated_items += 1;
     } else {
-        seen.insert(address);
+        seen.insert(address, plan.accounts.len());
         plan.accounts.push(address);
+        plan.account_confidence.push(confidence);
     }
 }
 
 fn push_storage(
     plan: &mut PrefetchPlan,
-    seen: &mut HashSet<StorageTarget>,
+    seen: &mut HashMap<StorageTarget, usize>,
     target: StorageTarget,
+    confidence: f64,
     limit: usize,
 ) {
-    if seen.contains(&target) {
+    if let Some(index) = seen.get(&target) {
         plan.diagnostics.duplicate_items += 1;
+        plan.storage_confidence[*index] = plan.storage_confidence[*index].max(confidence);
     } else if plan.storage.len() == limit {
         plan.diagnostics.truncated_items += 1;
     } else {
-        seen.insert(target);
+        seen.insert(target, plan.storage.len());
         plan.storage.push(target);
+        plan.storage_confidence.push(confidence);
     }
 }
 
@@ -286,7 +313,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(plan.accounts, vec![ACCOUNT]);
-        assert_eq!(plan.storage, vec![StorageTarget { address: ACCOUNT, slot: word }]);
+        assert_eq!(
+            plan.storage,
+            vec![StorageTarget {
+                address: ACCOUNT,
+                slot: word
+            }]
+        );
     }
 
     #[test]
@@ -389,6 +422,39 @@ mod tests {
         assert_eq!(plan.target_count(), 2);
         assert_eq!(plan.diagnostics.duplicate_items, 2);
         assert_eq!(plan.diagnostics.truncated_items, 2);
+    }
+
+    #[test]
+    fn deduplicated_targets_keep_highest_confidence() {
+        let slot = SlotExpression::Concrete {
+            value: B256::with_last_byte(1),
+        };
+        let mut hints = HintTable::new();
+        hints.insert(
+            TARGET,
+            CODE_HASH,
+            Some(SELECTOR),
+            vec![
+                PrefetchItem::Account {
+                    address: ACCOUNT,
+                    selector: None,
+                }
+                .with_confidence(0.4),
+                PrefetchItem::Account {
+                    address: ACCOUNT,
+                    selector: None,
+                }
+                .with_confidence(0.9),
+                PrefetchItem::Storage { slot: slot.clone() }.with_confidence(0.8),
+                PrefetchItem::Storage { slot }.with_confidence(0.3),
+            ],
+        );
+
+        let plan = PrefetchPlanner::new(&hints, PlanLimits::new(4, 4))
+            .plan(TARGET, CALLER, &calldata(B256::ZERO))
+            .unwrap();
+        assert_eq!(plan.account_confidence, vec![0.9]);
+        assert_eq!(plan.storage_confidence, vec![0.8]);
     }
 
     #[test]

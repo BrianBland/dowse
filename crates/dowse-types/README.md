@@ -10,8 +10,10 @@ sharing the same bytecode share one set of hints. Lookup resolves
 selector (`None`) when no exact match exists.
 
 **`PrefetchItem`** — one thing to prefetch:
+- `Scored { confidence, item }` — access probability for an item; unscored legacy items imply `1.0`
 - `Storage { slot: SlotExpression }` — a storage slot on the current contract
 - `Account { address, selector? }` — load account info; when selector is set, chain into that address's hint entry
+- `ExternalStorage { address, slot }` — a storage slot on a known external contract
 - `ComputedAccount { address: SlotExpression, selector? }` — account at a runtime-computed address (e.g. loaded via SLOAD)
 
 **`SlotExpression`** — an expression tree describing how to derive a concrete `B256`

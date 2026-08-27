@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use alloy_primitives::{Address, B256, FixedBytes, U256};
+use alloy_primitives::{Address, FixedBytes, B256, U256};
 use dowse_types::{PrefetchItem, SlotExpression};
 use revm::bytecode::opcode::*;
 
@@ -16,12 +16,18 @@ use revm::bytecode::opcode::*;
 #[allow(dead_code)]
 enum SymVal {
     Concrete(U256),
-    CalldataWord { offset: usize },
+    CalldataWord {
+        offset: usize,
+    },
     Caller,
     CallValue,
     CalldataSize,
-    Keccak256 { inputs: Vec<SymVal> },
-    SLoad { key: Box<SymVal> },
+    Keccak256 {
+        inputs: Vec<SymVal>,
+    },
+    SLoad {
+        key: Box<SymVal>,
+    },
     Add(Box<SymVal>, Box<SymVal>),
     Sub(Box<SymVal>, Box<SymVal>),
     Mul(Box<SymVal>, Box<SymVal>),
@@ -100,18 +106,18 @@ impl SymVal {
     }
 
     fn div(a: SymVal, b: SymVal) -> SymVal {
-        if let Some(v) = Self::try_concrete_binary(&a, &b, |a, b| {
-            if b.is_zero() { U256::ZERO } else { a / b }
-        }) {
+        if let Some(v) =
+            Self::try_concrete_binary(&a, &b, |a, b| if b.is_zero() { U256::ZERO } else { a / b })
+        {
             return SymVal::Concrete(v);
         }
         SymVal::Div(Box::new(a), Box::new(b))
     }
 
     fn modulo(a: SymVal, b: SymVal) -> SymVal {
-        if let Some(v) = Self::try_concrete_binary(&a, &b, |a, b| {
-            if b.is_zero() { U256::ZERO } else { a % b }
-        }) {
+        if let Some(v) =
+            Self::try_concrete_binary(&a, &b, |a, b| if b.is_zero() { U256::ZERO } else { a % b })
+        {
             return SymVal::Concrete(v);
         }
         SymVal::Mod(Box::new(a), Box::new(b))
@@ -165,7 +171,11 @@ impl SymVal {
 
     fn shl(shift: SymVal, value: SymVal) -> SymVal {
         if let Some(v) = Self::try_concrete_binary(&shift, &value, |shift, value| {
-            if shift >= U256::from(256) { U256::ZERO } else { value << shift }
+            if shift >= U256::from(256) {
+                U256::ZERO
+            } else {
+                value << shift
+            }
         }) {
             return SymVal::Concrete(v);
         }
@@ -174,7 +184,11 @@ impl SymVal {
 
     fn shr(shift: SymVal, value: SymVal) -> SymVal {
         if let Some(v) = Self::try_concrete_binary(&shift, &value, |shift, value| {
-            if shift >= U256::from(256) { U256::ZERO } else { value >> shift }
+            if shift >= U256::from(256) {
+                U256::ZERO
+            } else {
+                value >> shift
+            }
         }) {
             return SymVal::Concrete(v);
         }
@@ -182,27 +196,57 @@ impl SymVal {
     }
 
     fn eq(a: SymVal, b: SymVal) -> SymVal {
-        if let Some(v) = Self::try_concrete_binary(&a, &b, |a, b| {
-            if a == b { U256::from(1) } else { U256::ZERO }
-        }) {
+        if let Some(v) =
+            Self::try_concrete_binary(
+                &a,
+                &b,
+                |a, b| {
+                    if a == b {
+                        U256::from(1)
+                    } else {
+                        U256::ZERO
+                    }
+                },
+            )
+        {
             return SymVal::Concrete(v);
         }
         SymVal::Eq(Box::new(a), Box::new(b))
     }
 
     fn lt(a: SymVal, b: SymVal) -> SymVal {
-        if let Some(v) = Self::try_concrete_binary(&a, &b, |a, b| {
-            if a < b { U256::from(1) } else { U256::ZERO }
-        }) {
+        if let Some(v) =
+            Self::try_concrete_binary(
+                &a,
+                &b,
+                |a, b| {
+                    if a < b {
+                        U256::from(1)
+                    } else {
+                        U256::ZERO
+                    }
+                },
+            )
+        {
             return SymVal::Concrete(v);
         }
         SymVal::Lt(Box::new(a), Box::new(b))
     }
 
     fn gt(a: SymVal, b: SymVal) -> SymVal {
-        if let Some(v) = Self::try_concrete_binary(&a, &b, |a, b| {
-            if a > b { U256::from(1) } else { U256::ZERO }
-        }) {
+        if let Some(v) =
+            Self::try_concrete_binary(
+                &a,
+                &b,
+                |a, b| {
+                    if a > b {
+                        U256::from(1)
+                    } else {
+                        U256::ZERO
+                    }
+                },
+            )
+        {
             return SymVal::Concrete(v);
         }
         SymVal::Gt(Box::new(a), Box::new(b))
@@ -210,7 +254,11 @@ impl SymVal {
 
     fn iszero(a: SymVal) -> SymVal {
         if let SymVal::Concrete(v) = &a {
-            return SymVal::Concrete(if v.is_zero() { U256::from(1) } else { U256::ZERO });
+            return SymVal::Concrete(if v.is_zero() {
+                U256::from(1)
+            } else {
+                U256::ZERO
+            });
         }
         SymVal::IsZero(Box::new(a))
     }
@@ -257,9 +305,7 @@ impl SymbolicMemory {
     /// 32-byte symbolic words that cover the range.
     fn read_range(&self, offset: usize, size: usize) -> Vec<SymVal> {
         let num_words = (size + 31) / 32;
-        (0..num_words)
-            .map(|i| self.load(offset + i * 32))
-            .collect()
+        (0..num_words).map(|i| self.load(offset + i * 32)).collect()
     }
 }
 
@@ -617,17 +663,15 @@ impl<'a> SymbolicEvm<'a> {
                     let data_offset = self.pop();
                     let size = self.pop();
                     // If all concrete and size == 32, write a CalldataWord
-                    if let (
-                        SymVal::Concrete(dest),
-                        SymVal::Concrete(src),
-                        SymVal::Concrete(sz),
-                    ) = (&dest_offset, &data_offset, &size)
+                    if let (SymVal::Concrete(dest), SymVal::Concrete(src), SymVal::Concrete(sz)) =
+                        (&dest_offset, &data_offset, &size)
                     {
                         let dest = dest.as_limbs()[0] as usize;
                         let src = src.as_limbs()[0] as usize;
                         let sz = sz.as_limbs()[0] as usize;
                         if sz == 32 {
-                            self.memory.store(dest, SymVal::CalldataWord { offset: src });
+                            self.memory
+                                .store(dest, SymVal::CalldataWord { offset: src });
                         }
                     }
                     pc += 1;
@@ -665,7 +709,7 @@ impl<'a> SymbolicEvm<'a> {
                 MSTORE8 => {
                     self.pop(); // offset
                     self.pop(); // value
-                    // We don't track byte-level memory writes
+                                // We don't track byte-level memory writes
                     pc += 1;
                 }
                 MLOAD => {
@@ -716,15 +760,13 @@ impl<'a> SymbolicEvm<'a> {
                 SLOAD => {
                     let key = self.pop();
                     self.sload_keys.push(key.clone());
-                    self.push(SymVal::SLoad {
-                        key: Box::new(key),
-                    });
+                    self.push(SymVal::SLoad { key: Box::new(key) });
                     pc += 1;
                 }
                 SSTORE => {
                     self.pop(); // key
                     self.pop(); // value
-                    // Don't record writes — we only need reads for prefetching
+                                // Don't record writes — we only need reads for prefetching
                     pc += 1;
                 }
 
@@ -784,9 +826,9 @@ impl<'a> SymbolicEvm<'a> {
                         self.stack = saved_stack;
                         self.memory = saved_memory;
                         self.steps_remaining = if dest > pc {
-                            saved_remaining      // forward branch: full budget
+                            saved_remaining // forward branch: full budget
                         } else {
-                            saved_remaining / 4  // backward branch: likely loop
+                            saved_remaining / 4 // backward branch: likely loop
                         };
                         self.depth += 1;
                         self.execute(dest);
@@ -953,9 +995,7 @@ fn symval_to_slot_expr(val: &SymVal) -> Option<SlotExpression> {
         SymVal::Keccak256 { inputs } => {
             let converted: Option<Vec<SlotExpression>> =
                 inputs.iter().map(symval_to_slot_expr).collect();
-            Some(SlotExpression::Keccak256 {
-                inputs: converted?,
-            })
+            Some(SlotExpression::Keccak256 { inputs: converted? })
         }
         SymVal::Add(left, right) => {
             let l = symval_to_slot_expr(left)?;
@@ -967,9 +1007,7 @@ fn symval_to_slot_expr(val: &SymVal) -> Option<SlotExpression> {
         }
         SymVal::SLoad { key } => {
             let k = symval_to_slot_expr(key)?;
-            Some(SlotExpression::SLoad {
-                key: Box::new(k),
-            })
+            Some(SlotExpression::SLoad { key: Box::new(k) })
         }
         // AND(x, address_mask) → x  (Solidity address cleaning)
         SymVal::And(a, b) => {
@@ -1055,14 +1093,9 @@ fn extract_dispatch_table(bytecode: &[u8]) -> Vec<DispatchEntry> {
                     // is semantically equivalent to EQ
                     found_eq = true;
                     j += 2;
-                } else if found_eq
-                    && ahead_op >= PUSH1
-                    && ahead_op <= PUSH32
-                {
+                } else if found_eq && ahead_op >= PUSH1 && ahead_op <= PUSH32 {
                     let push_size = (ahead_op - PUSH1 + 1) as usize;
-                    if j + 1 + push_size < len
-                        && bytecode.get(j + 1 + push_size) == Some(&JUMPI)
-                    {
+                    if j + 1 + push_size < len && bytecode.get(j + 1 + push_size) == Some(&JUMPI) {
                         let mut dest = 0usize;
                         for k in 0..push_size {
                             dest = (dest << 8) | (bytecode[j + 1 + k] as usize);
@@ -1232,23 +1265,35 @@ fn convert_sload_keys(sload_keys: &[SymVal]) -> Vec<PrefetchItem> {
 }
 
 /// Append `PrefetchItem::Account` entries for unique call targets.
-fn append_call_target_items(call_targets: &[(Address, Option<FixedBytes<4>>)], items: &mut Vec<PrefetchItem>) {
+fn append_call_target_items(
+    call_targets: &[(Address, Option<FixedBytes<4>>)],
+    items: &mut Vec<PrefetchItem>,
+) {
     let mut seen = HashSet::new();
     for (addr, selector) in call_targets {
         if seen.insert(*addr) {
-            items.push(PrefetchItem::Account { address: *addr, selector: *selector });
+            items.push(PrefetchItem::Account {
+                address: *addr,
+                selector: *selector,
+            });
         }
     }
 }
 
 /// Append `PrefetchItem::ComputedAccount` entries for symbolic (non-concrete) call targets.
-fn append_computed_call_items(symbolic_targets: &[(SymVal, Option<FixedBytes<4>>)], items: &mut Vec<PrefetchItem>) {
+fn append_computed_call_items(
+    symbolic_targets: &[(SymVal, Option<FixedBytes<4>>)],
+    items: &mut Vec<PrefetchItem>,
+) {
     let mut seen = HashSet::new();
     for (target, selector) in symbolic_targets {
         if let Some(expr) = symval_to_slot_expr(target) {
             let key_str = format!("{expr:?}");
             if seen.insert(key_str) {
-                items.push(PrefetchItem::ComputedAccount { address: expr, selector: *selector });
+                items.push(PrefetchItem::ComputedAccount {
+                    address: expr,
+                    selector: *selector,
+                });
             }
         }
     }
@@ -1307,7 +1352,14 @@ pub fn analyzed_to_entries(
             } else {
                 Some(a.selector)
             };
-            (selector, a.items.clone())
+            (
+                selector,
+                a.items
+                    .iter()
+                    .cloned()
+                    .map(|item| item.with_confidence(a.confidence))
+                    .collect(),
+            )
         })
         .collect()
 }
@@ -1333,6 +1385,20 @@ mod tests {
     }
 
     #[test]
+    fn entries_retain_analyzer_confidence() {
+        let analyzed = vec![AnalyzedSelector {
+            selector: FixedBytes::from([1, 2, 3, 4]),
+            items: vec![PrefetchItem::Storage {
+                slot: SlotExpression::Concrete { value: B256::ZERO },
+            }],
+            confidence: 0.8,
+        }];
+
+        let entries = analyzed_to_entries(&analyzed);
+        assert_eq!(entries[0].1[0].scored().1, 0.8);
+    }
+
+    #[test]
     fn binary_search_dispatch_table() {
         let bytecode = decode_hex("608060405234801561001057600080fd5b506004361061036d5760003560e01c80638456cb59116101d3578063b7b7289911610104578063e3ee160e116100a2578063ef55bec61161007c578063ef55bec614611122578063f2fde38b1461118e578063f9f92be4146111c1578063fe575a87146111f45761036d565b8063e3ee160e14611075578063e5a6b10f146110e1578063e94a0102146110e95761036d565b8063d505accf116100de578063d505accf14610f64578063d608ea641461\
 0fc2578063d916948614610ffe578063dd62ed3e1461103e5761036d");
@@ -1343,7 +1409,9 @@ mod tests {
             "Expected >= 10 selectors, got {}",
             table.len(),
         );
-        assert!(table.iter().any(|e| e.selector == FixedBytes::from([0xdd, 0x62, 0xed, 0x3e])));
+        assert!(table
+            .iter()
+            .any(|e| e.selector == FixedBytes::from([0xdd, 0x62, 0xed, 0x3e])));
     }
 
     #[test]
@@ -1410,7 +1478,11 @@ mod tests {
 
         let results = analyze_bytecode(&bytecode);
         // 2 selectors + 1 fallback/default entry
-        assert!(results.len() >= 2, "Expected at least 2 results, got {}", results.len());
+        assert!(
+            results.len() >= 2,
+            "Expected at least 2 results, got {}",
+            results.len()
+        );
 
         let sel_a = results
             .iter()
@@ -1448,19 +1520,25 @@ mod tests {
         // SLOAD                       -- load the mapping slot
         // STOP
         let bytecode: Vec<u8> = vec![
-            JUMPDEST,       // 0: JUMPDEST
-            PUSH1, 0x04,    // 1: PUSH1 0x04
-            CALLDATALOAD,   // 3: CALLDATALOAD
-            PUSH1, 0x00,    // 4: PUSH1 0x00
-            MSTORE,         // 6: MSTORE (mem[0] = calldataload(4))
-            PUSH1, 0x00,    // 7: PUSH1 0x00
-            PUSH1, 0x20,    // 9: PUSH1 0x20
-            MSTORE,         // 11: MSTORE (mem[32] = 0)
-            PUSH1, 0x40,    // 12: PUSH1 0x40
-            PUSH1, 0x00,    // 14: PUSH1 0x00
-            KECCAK256,           // 16: KECCAK256(0, 64)
-            SLOAD,          // 17: SLOAD
-            STOP,           // 18: STOP
+            JUMPDEST, // 0: JUMPDEST
+            PUSH1,
+            0x04,         // 1: PUSH1 0x04
+            CALLDATALOAD, // 3: CALLDATALOAD
+            PUSH1,
+            0x00,   // 4: PUSH1 0x00
+            MSTORE, // 6: MSTORE (mem[0] = calldataload(4))
+            PUSH1,
+            0x00, // 7: PUSH1 0x00
+            PUSH1,
+            0x20,   // 9: PUSH1 0x20
+            MSTORE, // 11: MSTORE (mem[32] = 0)
+            PUSH1,
+            0x40, // 12: PUSH1 0x40
+            PUSH1,
+            0x00,      // 14: PUSH1 0x00
+            KECCAK256, // 16: KECCAK256(0, 64)
+            SLOAD,     // 17: SLOAD
+            STOP,      // 18: STOP
         ];
 
         let jumpdests = collect_jumpdests(&bytecode);
@@ -1470,11 +1548,15 @@ mod tests {
         assert_eq!(evm.sload_keys.len(), 1);
 
         // Should produce Keccak256 { [CalldataWord{4}, Concrete(0)] }
-        let expr = symval_to_slot_expr(&evm.sload_keys[0]).expect("Should convert to SlotExpression");
+        let expr =
+            symval_to_slot_expr(&evm.sload_keys[0]).expect("Should convert to SlotExpression");
         match &expr {
             SlotExpression::Keccak256 { inputs } => {
                 assert_eq!(inputs.len(), 2);
-                assert!(matches!(&inputs[0], SlotExpression::CalldataWord { offset: 4 }));
+                assert!(matches!(
+                    &inputs[0],
+                    SlotExpression::CalldataWord { offset: 4 }
+                ));
                 assert!(matches!(
                     &inputs[1],
                     SlotExpression::Concrete { value } if *value == B256::ZERO
@@ -1494,18 +1576,18 @@ mod tests {
         // SLOAD
         // STOP
         let bytecode: Vec<u8> = vec![
-            JUMPDEST,       // 0
-            CALLER,         // 1
-            PUSH1, 0x00,    // 2
-            MSTORE,         // 4
-            PUSH1, 0x09,    // 5
-            PUSH1, 0x20,    // 7
-            MSTORE,         // 9
-            PUSH1, 0x40,    // 10
-            PUSH1, 0x00,    // 12
-            KECCAK256,           // 14
-            SLOAD,          // 15
-            STOP,           // 16
+            JUMPDEST, // 0
+            CALLER,   // 1
+            PUSH1, 0x00,   // 2
+            MSTORE, // 4
+            PUSH1, 0x09, // 5
+            PUSH1, 0x20,   // 7
+            MSTORE, // 9
+            PUSH1, 0x40, // 10
+            PUSH1, 0x00,      // 12
+            KECCAK256, // 14
+            SLOAD,     // 15
+            STOP,      // 16
         ];
 
         let jumpdests = collect_jumpdests(&bytecode);
@@ -1531,14 +1613,7 @@ mod tests {
     #[test]
     fn symbolic_constant_fold() {
         // PUSH1 3 PUSH1 5 ADD SLOAD STOP
-        let bytecode: Vec<u8> = vec![
-            JUMPDEST,
-            PUSH1, 3,
-            PUSH1, 5,
-            ADD,
-            SLOAD,
-            STOP,
-        ];
+        let bytecode: Vec<u8> = vec![JUMPDEST, PUSH1, 3, PUSH1, 5, ADD, SLOAD, STOP];
 
         let jumpdests = collect_jumpdests(&bytecode);
         let mut evm = SymbolicEvm::new(&bytecode, jumpdests);
@@ -1562,17 +1637,17 @@ mod tests {
         // PUSH1 0x0A SLOAD STOP -- taken: SLOAD(10)
         let target: u8 = 10;
         let bytecode: Vec<u8> = vec![
-            JUMPDEST,           // 0
-            PUSH1, 0x01,        // 1: condition = 1
-            PUSH1, target,      // 3: push target
-            JUMPI,              // 5
-            PUSH1, 0x05,        // 6: fall-through
-            SLOAD,              // 8
-            STOP,               // 9
-            JUMPDEST,           // 10: target
-            PUSH1, 0x0A,        // 11
-            SLOAD,              // 13
-            STOP,               // 14
+            JUMPDEST, // 0
+            PUSH1, 0x01, // 1: condition = 1
+            PUSH1, target, // 3: push target
+            JUMPI,  // 5
+            PUSH1, 0x05,     // 6: fall-through
+            SLOAD,    // 8
+            STOP,     // 9
+            JUMPDEST, // 10: target
+            PUSH1, 0x0A,  // 11
+            SLOAD, // 13
+            STOP,  // 14
         ];
 
         let jumpdests = collect_jumpdests(&bytecode);
@@ -1580,7 +1655,11 @@ mod tests {
         evm.execute(0);
 
         // Should find both SLOAD(5) and SLOAD(10) from both branches
-        assert!(evm.sload_keys.len() >= 2, "Should explore both branches, got {} keys", evm.sload_keys.len());
+        assert!(
+            evm.sload_keys.len() >= 2,
+            "Should explore both branches, got {} keys",
+            evm.sload_keys.len()
+        );
 
         let items = convert_sload_keys(&evm.sload_keys);
         assert!(items.iter().any(|item| matches!(
@@ -1601,8 +1680,8 @@ mod tests {
         // stored in memory. The selector 0xd0e30db0 (deposit()) is written to mem[0x80]
         // via MSTORE, then argsOffset=0x80 is passed to STATICCALL.
         let target = Address::from_slice(&[
-            0xde, 0xad, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0xde, 0xad, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
         ]);
         let expected_selector = FixedBytes::<4>::from([0xd0, 0xe3, 0x0d, 0xb0]);
         // Selector left-padded into a 32-byte word (big-endian, high bytes)
@@ -1613,8 +1692,8 @@ mod tests {
         selector_word[3] = 0xb0;
 
         let mut bytecode = vec![JUMPDEST]; // 0
-        // Store selector into memory at offset 0x80:
-        // PUSH32 <selector_word> PUSH1 0x80 MSTORE
+                                           // Store selector into memory at offset 0x80:
+                                           // PUSH32 <selector_word> PUSH1 0x80 MSTORE
         bytecode.push(PUSH32);
         bytecode.extend_from_slice(&selector_word);
         bytecode.push(PUSH1);
@@ -1622,11 +1701,15 @@ mod tests {
         bytecode.push(MSTORE);
         // Stack args for STATICCALL (pushed in reverse):
         // retLength=0, retOffset=0, argsLength=4, argsOffset=0x80
-        bytecode.push(PUSH1); bytecode.push(0x00); // retLength
-        bytecode.push(PUSH1); bytecode.push(0x00); // retOffset
-        bytecode.push(PUSH1); bytecode.push(0x04); // argsLength
-        bytecode.push(PUSH1); bytecode.push(0x80); // argsOffset
-        // Push target address (PUSH20)
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // retLength
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // retOffset
+        bytecode.push(PUSH1);
+        bytecode.push(0x04); // argsLength
+        bytecode.push(PUSH1);
+        bytecode.push(0x80); // argsOffset
+                             // Push target address (PUSH20)
         bytecode.push(0x73); // PUSH20
         bytecode.extend_from_slice(target.as_slice());
         // Push gas
@@ -1639,10 +1722,12 @@ mod tests {
         // No dispatch table, so should get wildcard entry
         assert!(!results.is_empty());
         let items = &results[0].items;
-        let account_item = items.iter().find(|item| matches!(
-            item,
-            PrefetchItem::Account { address, .. } if *address == target
-        ));
+        let account_item = items.iter().find(|item| {
+            matches!(
+                item,
+                PrefetchItem::Account { address, .. } if *address == target
+            )
+        });
         assert!(
             account_item.is_some(),
             "Should find Account item for STATICCALL target, got: {items:?}",
@@ -1650,7 +1735,11 @@ mod tests {
         // Verify selector was extracted
         match account_item.unwrap() {
             PrefetchItem::Account { selector, .. } => {
-                assert_eq!(*selector, Some(expected_selector), "Should extract selector from memory");
+                assert_eq!(
+                    *selector,
+                    Some(expected_selector),
+                    "Should extract selector from memory"
+                );
             }
             _ => unreachable!(),
         }
@@ -1674,7 +1763,10 @@ mod tests {
         // Should not have any Account items
         for result in &results {
             assert!(
-                !result.items.iter().any(|item| matches!(item, PrefetchItem::Account { .. })),
+                !result
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, PrefetchItem::Account { .. })),
                 "Precompile addresses should be filtered out",
             );
         }
@@ -1685,41 +1777,59 @@ mod tests {
         // Build bytecode that does STATICCALL to a keccak256-computed address.
         // Push the 4 trailing args first, then compute the address, then push gas.
         let bytecode: Vec<u8> = vec![
-            JUMPDEST,           // 0
+            JUMPDEST, // 0
             // Push 4 zeros for retLength, retOffset, argsLength, argsOffset
-            PUSH1, 0x00,        // 1
-            PUSH1, 0x00,        // 3
-            PUSH1, 0x00,        // 5
-            PUSH1, 0x00,        // 7
+            PUSH1,
+            0x00, // 1
+            PUSH1,
+            0x00, // 3
+            PUSH1,
+            0x00, // 5
+            PUSH1,
+            0x00, // 7
             // Compute keccak256(calldataload(4), 42) for the address
-            PUSH1, 0x04,        // 9
-            CALLDATALOAD,       // 11: calldataload(4)
-            PUSH1, 0x00,        // 12
-            MSTORE,             // 14: mem[0] = calldataload(4)
-            PUSH1, 0x2a,        // 15: 42
-            PUSH1, 0x20,        // 17
-            MSTORE,             // 19: mem[32] = 42
-            PUSH1, 0x40,        // 20: size = 64
-            PUSH1, 0x00,        // 22: offset = 0
-            KECCAK256,               // 24: keccak256(mem[0..64]) -> stack has address
+            PUSH1,
+            0x04,         // 9
+            CALLDATALOAD, // 11: calldataload(4)
+            PUSH1,
+            0x00,   // 12
+            MSTORE, // 14: mem[0] = calldataload(4)
+            PUSH1,
+            0x2a, // 15: 42
+            PUSH1,
+            0x20,   // 17
+            MSTORE, // 19: mem[32] = 42
+            PUSH1,
+            0x40, // 20: size = 64
+            PUSH1,
+            0x00,      // 22: offset = 0
+            KECCAK256, // 24: keccak256(mem[0..64]) -> stack has address
             // Push gas
-            GAS,                // 25
+            GAS, // 25
             // STATICCALL(gas, addr, argsOff, argsLen, retOff, retLen)
-            STATICCALL,         // 26
-            STOP,               // 27
+            STATICCALL, // 26
+            STOP,       // 27
         ];
 
         let results = analyze_bytecode(&bytecode);
         assert!(!results.is_empty(), "Should produce at least one result");
         let items = &results[0].items;
         assert!(
-            items.iter().any(|item| matches!(item, PrefetchItem::ComputedAccount { .. })),
+            items
+                .iter()
+                .any(|item| matches!(item, PrefetchItem::ComputedAccount { .. })),
             "Should find ComputedAccount item for symbolic STATICCALL target, got: {items:?}",
         );
         // Verify it's a Keccak256 expression
-        let computed = items.iter().find(|item| matches!(item, PrefetchItem::ComputedAccount { .. })).unwrap();
+        let computed = items
+            .iter()
+            .find(|item| matches!(item, PrefetchItem::ComputedAccount { .. }))
+            .unwrap();
         if let PrefetchItem::ComputedAccount { address: expr, .. } = computed {
-            assert!(matches!(expr, SlotExpression::Keccak256 { .. }), "Expected Keccak256 expression, got: {expr:?}");
+            assert!(
+                matches!(expr, SlotExpression::Keccak256 { .. }),
+                "Expected Keccak256 expression, got: {expr:?}"
+            );
         }
     }
 
@@ -1760,49 +1870,79 @@ mod tests {
         let mut p = 0;
 
         // calldataload(0) >> 224 → selector on stack
-        bc[p] = PUSH1; bc[p+1] = 0x00; p += 2;     // push 0
-        bc[p] = CALLDATALOAD; p += 1;                // calldataload(0)
-        bc[p] = PUSH1; bc[p+1] = 0xe0; p += 2;     // push 224
-        bc[p] = SHR; p += 1;                         // shr
+        bc[p] = PUSH1;
+        bc[p + 1] = 0x00;
+        p += 2; // push 0
+        bc[p] = CALLDATALOAD;
+        p += 1; // calldataload(0)
+        bc[p] = PUSH1;
+        bc[p + 1] = 0xe0;
+        p += 2; // push 224
+        bc[p] = SHR;
+        p += 1; // shr
 
         // DUP1 PUSH4 <mid> GT PUSH2 <right_half=0x20> JUMPI
-        bc[p] = DUP1; p += 1;
-        bc[p] = 0x63; p += 1; // PUSH4
-        bc[p..p+4].copy_from_slice(&mid); p += 4;
-        bc[p] = GT; p += 1;
-        bc[p] = PUSH1; bc[p+1] = 0x20; p += 2; // right half at 0x20
-        bc[p] = JUMPI; p += 1;
+        bc[p] = DUP1;
+        p += 1;
+        bc[p] = 0x63;
+        p += 1; // PUSH4
+        bc[p..p + 4].copy_from_slice(&mid);
+        p += 4;
+        bc[p] = GT;
+        p += 1;
+        bc[p] = PUSH1;
+        bc[p + 1] = 0x20;
+        p += 2; // right half at 0x20
+        bc[p] = JUMPI;
+        p += 1;
 
         // Left half: DUP1 PUSH4 <sel_a> EQ PUSH1 <0x80> JUMPI
-        bc[p] = DUP1; p += 1;
-        bc[p] = 0x63; p += 1;
-        bc[p..p+4].copy_from_slice(&sel_a); p += 4;
-        bc[p] = EQ; p += 1;
-        bc[p] = PUSH1; bc[p+1] = 0x80; p += 2;
-        bc[p] = JUMPI; p += 1;
-        bc[p] = STOP; p += 1;
+        bc[p] = DUP1;
+        p += 1;
+        bc[p] = 0x63;
+        p += 1;
+        bc[p..p + 4].copy_from_slice(&sel_a);
+        p += 4;
+        bc[p] = EQ;
+        p += 1;
+        bc[p] = PUSH1;
+        bc[p + 1] = 0x80;
+        p += 2;
+        bc[p] = JUMPI;
+        p += 1;
+        bc[p] = STOP;
+        p += 1;
 
         // Right half at 0x20
         let right_half = 0x20;
         bc[right_half] = JUMPDEST;
         let mut p = right_half + 1;
-        bc[p] = DUP1; p += 1;
-        bc[p] = 0x63; p += 1;
-        bc[p..p+4].copy_from_slice(&sel_b); p += 4;
-        bc[p] = EQ; p += 1;
-        bc[p] = PUSH1; bc[p+1] = 0x90; p += 2;
-        bc[p] = JUMPI; p += 1;
+        bc[p] = DUP1;
+        p += 1;
+        bc[p] = 0x63;
+        p += 1;
+        bc[p..p + 4].copy_from_slice(&sel_b);
+        p += 4;
+        bc[p] = EQ;
+        p += 1;
+        bc[p] = PUSH1;
+        bc[p + 1] = 0x90;
+        p += 2;
+        bc[p] = JUMPI;
+        p += 1;
         bc[p] = STOP;
 
         // dest_a at 0x80: JUMPDEST PUSH1 5 SLOAD STOP
         bc[0x80] = JUMPDEST;
-        bc[0x81] = PUSH1; bc[0x82] = 5;
+        bc[0x81] = PUSH1;
+        bc[0x82] = 5;
         bc[0x83] = SLOAD;
         bc[0x84] = STOP;
 
         // dest_b at 0x90: JUMPDEST PUSH1 10 SLOAD STOP
         bc[0x90] = JUMPDEST;
-        bc[0x91] = PUSH1; bc[0x92] = 10;
+        bc[0x91] = PUSH1;
+        bc[0x92] = 10;
         bc[0x93] = SLOAD;
         bc[0x94] = STOP;
 
@@ -1827,17 +1967,26 @@ mod tests {
         let sel = [0xaa, 0xbb, 0xcc, 0xdd];
         let mut bc = vec![0u8; 64];
         let mut p = 0;
-        bc[p] = 0x63; p += 1; // PUSH4
-        bc[p..p+4].copy_from_slice(&sel); p += 4;
-        bc[p] = DUP1; p += 1; // stand-in for DUP2
-        bc[p] = XOR; p += 1;
-        bc[p] = ISZERO; p += 1;
-        bc[p] = PUSH1; bc[p+1] = 0x20; p += 2;
-        bc[p] = JUMPI; p += 1;
+        bc[p] = 0x63;
+        p += 1; // PUSH4
+        bc[p..p + 4].copy_from_slice(&sel);
+        p += 4;
+        bc[p] = DUP1;
+        p += 1; // stand-in for DUP2
+        bc[p] = XOR;
+        p += 1;
+        bc[p] = ISZERO;
+        p += 1;
+        bc[p] = PUSH1;
+        bc[p + 1] = 0x20;
+        p += 2;
+        bc[p] = JUMPI;
+        p += 1;
         bc[p] = STOP;
 
         bc[0x20] = JUMPDEST;
-        bc[0x21] = PUSH1; bc[0x22] = 3;
+        bc[0x21] = PUSH1;
+        bc[0x22] = 3;
         bc[0x23] = SLOAD;
         bc[0x24] = STOP;
 
@@ -1854,17 +2003,26 @@ mod tests {
         let sel = [0x12, 0x34, 0x56, 0x78];
         let mut bc = vec![0u8; 64];
         let mut p = 0;
-        bc[p] = 0x63; p += 1; // PUSH4
-        bc[p..p+4].copy_from_slice(&sel); p += 4;
-        bc[p] = DUP1; p += 1;
-        bc[p] = SUB; p += 1;
-        bc[p] = ISZERO; p += 1;
-        bc[p] = PUSH1; bc[p+1] = 0x20; p += 2;
-        bc[p] = JUMPI; p += 1;
+        bc[p] = 0x63;
+        p += 1; // PUSH4
+        bc[p..p + 4].copy_from_slice(&sel);
+        p += 4;
+        bc[p] = DUP1;
+        p += 1;
+        bc[p] = SUB;
+        p += 1;
+        bc[p] = ISZERO;
+        p += 1;
+        bc[p] = PUSH1;
+        bc[p + 1] = 0x20;
+        p += 2;
+        bc[p] = JUMPI;
+        p += 1;
         bc[p] = STOP;
 
         bc[0x20] = JUMPDEST;
-        bc[0x21] = PUSH1; bc[0x22] = 7;
+        bc[0x21] = PUSH1;
+        bc[0x22] = 7;
         bc[0x23] = SLOAD;
         bc[0x24] = STOP;
 
@@ -1884,20 +2042,30 @@ mod tests {
         let sel = [0xde, 0xad, 0xbe, 0xef];
         let mut bc = vec![0u8; 64];
         let mut p = 0;
-        bc[p] = 0x63; p += 1; // PUSH4
-        bc[p..p+4].copy_from_slice(&sel); p += 4;
+        bc[p] = 0x63;
+        p += 1; // PUSH4
+        bc[p..p + 4].copy_from_slice(&sel);
+        p += 4;
         // PUSH2 with data containing 0x14 (EQ byte value) and 0x61 (PUSH2 byte value)
-        bc[p] = PUSH1 + 1; p += 1; // PUSH2 = 0x61
-        bc[p] = EQ; p += 1;        // 0x14 as DATA, not opcode
-        bc[p] = PUSH1 + 1; p += 1; // 0x61 as DATA, not opcode
-        // Now the real EQ
-        bc[p] = EQ; p += 1;
-        bc[p] = PUSH1; bc[p+1] = 0x30; p += 2;
-        bc[p] = JUMPI; p += 1;
+        bc[p] = PUSH1 + 1;
+        p += 1; // PUSH2 = 0x61
+        bc[p] = EQ;
+        p += 1; // 0x14 as DATA, not opcode
+        bc[p] = PUSH1 + 1;
+        p += 1; // 0x61 as DATA, not opcode
+                // Now the real EQ
+        bc[p] = EQ;
+        p += 1;
+        bc[p] = PUSH1;
+        bc[p + 1] = 0x30;
+        p += 2;
+        bc[p] = JUMPI;
+        p += 1;
         bc[p] = STOP;
 
         bc[0x30] = JUMPDEST;
-        bc[0x31] = PUSH1; bc[0x32] = 1;
+        bc[0x31] = PUSH1;
+        bc[0x32] = 1;
         bc[0x33] = SLOAD;
         bc[0x34] = STOP;
 
@@ -1909,8 +2077,14 @@ mod tests {
 
         // Verify the destination is correct (0x30, not a garbage value from PUSH data)
         let table = extract_dispatch_table(&bc);
-        let entry = table.iter().find(|e| e.selector == FixedBytes::from(sel)).unwrap();
-        assert_eq!(entry.dest, 0x30, "Destination should be 0x30, not from PUSH data");
+        let entry = table
+            .iter()
+            .find(|e| e.selector == FixedBytes::from(sel))
+            .unwrap();
+        assert_eq!(
+            entry.dest, 0x30,
+            "Destination should be 0x30, not from PUSH data"
+        );
     }
 
     /// PUSH3 jump destination for large contracts (> 64KB).
@@ -1921,18 +2095,28 @@ mod tests {
         let dest: usize = 0x01_00_80; // 65664, needs PUSH3
         let mut bc = vec![0u8; 16];
         let mut p = 0;
-        bc[p] = 0x63; p += 1; // PUSH4
-        bc[p..p+4].copy_from_slice(&sel); p += 4;
-        bc[p] = EQ; p += 1;
-        bc[p] = PUSH1 + 2; p += 1; // PUSH3 = 0x62
-        bc[p] = ((dest >> 16) & 0xff) as u8; p += 1;
-        bc[p] = ((dest >> 8) & 0xff) as u8; p += 1;
-        bc[p] = (dest & 0xff) as u8; p += 1;
+        bc[p] = 0x63;
+        p += 1; // PUSH4
+        bc[p..p + 4].copy_from_slice(&sel);
+        p += 4;
+        bc[p] = EQ;
+        p += 1;
+        bc[p] = PUSH1 + 2;
+        p += 1; // PUSH3 = 0x62
+        bc[p] = ((dest >> 16) & 0xff) as u8;
+        p += 1;
+        bc[p] = ((dest >> 8) & 0xff) as u8;
+        p += 1;
+        bc[p] = (dest & 0xff) as u8;
+        p += 1;
         bc[p] = JUMPI;
 
         let table = extract_dispatch_table(&bc);
         assert_eq!(table.len(), 1, "Should find one dispatch entry");
-        assert_eq!(table[0].dest, dest, "Should decode PUSH3 destination correctly");
+        assert_eq!(
+            table[0].dest, dest,
+            "Should decode PUSH3 destination correctly"
+        );
     }
 
     // ── Fallback / default path analysis ─────────────────────────────────
@@ -1951,29 +2135,37 @@ mod tests {
         bytecode[1..5].copy_from_slice(&[0xaa, 0xaa, 0xaa, 0xaa]);
         bytecode[5] = EQ;
         bytecode[6] = PUSH1 + 1; // PUSH2
-        bytecode[7] = 0x00; bytecode[8] = 0x40; // dest = 64
+        bytecode[7] = 0x00;
+        bytecode[8] = 0x40; // dest = 64
         bytecode[9] = JUMPI;
 
         // Fallback path (no selector matched): PUSH1 99 SLOAD STOP
-        bytecode[10] = PUSH1; bytecode[11] = 99;
+        bytecode[10] = PUSH1;
+        bytecode[11] = 99;
         bytecode[12] = SLOAD;
         bytecode[13] = STOP;
 
         // Selector A handler: JUMPDEST PUSH1 5 SLOAD STOP
         bytecode[64] = JUMPDEST;
-        bytecode[65] = PUSH1; bytecode[66] = 5;
+        bytecode[65] = PUSH1;
+        bytecode[66] = 5;
         bytecode[67] = SLOAD;
         bytecode[68] = STOP;
 
         let results = analyze_bytecode(&bytecode);
 
         // Should have selector A entry
-        let sel_a = results.iter().find(|r| r.selector == FixedBytes::from([0xaa, 0xaa, 0xaa, 0xaa]));
+        let sel_a = results
+            .iter()
+            .find(|r| r.selector == FixedBytes::from([0xaa, 0xaa, 0xaa, 0xaa]));
         assert!(sel_a.is_some(), "Should find selector A");
 
         // Should have a wildcard/fallback entry (FixedBytes::default() = 0x00000000)
         let fallback = results.iter().find(|r| r.selector == FixedBytes::default());
-        assert!(fallback.is_some(), "Should produce a fallback/default entry");
+        assert!(
+            fallback.is_some(),
+            "Should produce a fallback/default entry"
+        );
 
         // Fallback should contain slot(99) from the fallback path
         let fb_items = &fallback.unwrap().items;
@@ -1993,15 +2185,19 @@ mod tests {
     #[test]
     fn call_without_memory_selector() {
         let target = Address::from_slice(&[
-            0xde, 0xad, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0xde, 0xad, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
         ]);
         let mut bytecode = vec![JUMPDEST];
         // argsOffset=0, nothing written to mem[0] → selector is zero → None
-        bytecode.push(PUSH1); bytecode.push(0x00); // retLength
-        bytecode.push(PUSH1); bytecode.push(0x00); // retOffset
-        bytecode.push(PUSH1); bytecode.push(0x00); // argsLength
-        bytecode.push(PUSH1); bytecode.push(0x00); // argsOffset = 0 (mem[0] = 0)
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // retLength
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // retOffset
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // argsLength
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // argsOffset = 0 (mem[0] = 0)
         bytecode.push(0x73); // PUSH20
         bytecode.extend_from_slice(target.as_slice());
         bytecode.push(GAS);
@@ -2010,13 +2206,16 @@ mod tests {
 
         let results = analyze_bytecode(&bytecode);
         assert!(!results.is_empty());
-        let account_item = results.iter()
-            .flat_map(|r| &r.items)
-            .find(|item| matches!(item, PrefetchItem::Account { address, .. } if *address == target));
+        let account_item = results.iter().flat_map(|r| &r.items).find(
+            |item| matches!(item, PrefetchItem::Account { address, .. } if *address == target),
+        );
         assert!(account_item.is_some(), "Should find Account item");
         match account_item.unwrap() {
             PrefetchItem::Account { selector, .. } => {
-                assert_eq!(*selector, None, "No selector in memory → selector should be None");
+                assert_eq!(
+                    *selector, None,
+                    "No selector in memory → selector should be None"
+                );
             }
             _ => unreachable!(),
         }
@@ -2026,8 +2225,8 @@ mod tests {
     #[test]
     fn call_opcode_extracts_selector() {
         let target = Address::from_slice(&[
-            0xca, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0xca, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
         ]);
         let expected_sel = FixedBytes::<4>::from([0xa9, 0x05, 0x9c, 0xbb]);
         let mut selector_word = [0u8; 32];
@@ -2037,14 +2236,20 @@ mod tests {
         // Store selector at mem[0x40]
         bytecode.push(PUSH32);
         bytecode.extend_from_slice(&selector_word);
-        bytecode.push(PUSH1); bytecode.push(0x40);
+        bytecode.push(PUSH1);
+        bytecode.push(0x40);
         bytecode.push(MSTORE);
         // CALL args (pushed in reverse): retLen, retOff, argsLen, argsOff, value, addr, gas
-        bytecode.push(PUSH1); bytecode.push(0x00); // retLength
-        bytecode.push(PUSH1); bytecode.push(0x00); // retOffset
-        bytecode.push(PUSH1); bytecode.push(0x04); // argsLength
-        bytecode.push(PUSH1); bytecode.push(0x40); // argsOffset
-        bytecode.push(PUSH1); bytecode.push(0x00); // value = 0
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // retLength
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // retOffset
+        bytecode.push(PUSH1);
+        bytecode.push(0x04); // argsLength
+        bytecode.push(PUSH1);
+        bytecode.push(0x40); // argsOffset
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // value = 0
         bytecode.push(0x73); // PUSH20
         bytecode.extend_from_slice(target.as_slice());
         bytecode.push(GAS);
@@ -2052,13 +2257,20 @@ mod tests {
         bytecode.push(STOP);
 
         let results = analyze_bytecode(&bytecode);
-        let account_item = results.iter()
-            .flat_map(|r| &r.items)
-            .find(|item| matches!(item, PrefetchItem::Account { address, .. } if *address == target));
-        assert!(account_item.is_some(), "Should find Account item for CALL target");
+        let account_item = results.iter().flat_map(|r| &r.items).find(
+            |item| matches!(item, PrefetchItem::Account { address, .. } if *address == target),
+        );
+        assert!(
+            account_item.is_some(),
+            "Should find Account item for CALL target"
+        );
         match account_item.unwrap() {
             PrefetchItem::Account { selector, .. } => {
-                assert_eq!(*selector, Some(expected_sel), "CALL should extract selector from memory");
+                assert_eq!(
+                    *selector,
+                    Some(expected_sel),
+                    "CALL should extract selector from memory"
+                );
             }
             _ => unreachable!(),
         }
@@ -2068,8 +2280,8 @@ mod tests {
     #[test]
     fn delegatecall_extracts_selector() {
         let target = Address::from_slice(&[
-            0xbe, 0xef, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0xbe, 0xef, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
         ]);
         let expected_sel = FixedBytes::<4>::from([0x70, 0xa0, 0x82, 0x31]);
         let mut selector_word = [0u8; 32];
@@ -2079,13 +2291,18 @@ mod tests {
         // Store selector at mem[0x00]
         bytecode.push(PUSH32);
         bytecode.extend_from_slice(&selector_word);
-        bytecode.push(PUSH1); bytecode.push(0x00);
+        bytecode.push(PUSH1);
+        bytecode.push(0x00);
         bytecode.push(MSTORE);
         // DELEGATECALL: retLen, retOff, argsLen, argsOff, addr, gas
-        bytecode.push(PUSH1); bytecode.push(0x00); // retLength
-        bytecode.push(PUSH1); bytecode.push(0x00); // retOffset
-        bytecode.push(PUSH1); bytecode.push(0x04); // argsLength
-        bytecode.push(PUSH1); bytecode.push(0x00); // argsOffset
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // retLength
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // retOffset
+        bytecode.push(PUSH1);
+        bytecode.push(0x04); // argsLength
+        bytecode.push(PUSH1);
+        bytecode.push(0x00); // argsOffset
         bytecode.push(0x73); // PUSH20
         bytecode.extend_from_slice(target.as_slice());
         bytecode.push(GAS);
@@ -2093,10 +2310,13 @@ mod tests {
         bytecode.push(STOP);
 
         let results = analyze_bytecode(&bytecode);
-        let account_item = results.iter()
-            .flat_map(|r| &r.items)
-            .find(|item| matches!(item, PrefetchItem::Account { address, .. } if *address == target));
-        assert!(account_item.is_some(), "Should find Account item for DELEGATECALL target");
+        let account_item = results.iter().flat_map(|r| &r.items).find(
+            |item| matches!(item, PrefetchItem::Account { address, .. } if *address == target),
+        );
+        assert!(
+            account_item.is_some(),
+            "Should find Account item for DELEGATECALL target"
+        );
         match account_item.unwrap() {
             PrefetchItem::Account { selector, .. } => {
                 assert_eq!(*selector, Some(expected_sel));
@@ -2113,8 +2333,8 @@ mod tests {
     fn stateless_contract_produces_account_items() {
         // Bytecode with dispatch → CALL to hardcoded address, no SLOAD
         let target = Address::from_slice(&[
-            0xfa, 0xc7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            0xfa, 0xc7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
         ]);
         let sel_word = [0xe6, 0xa4, 0x39, 0x05u8]; // getPair selector
 
@@ -2123,42 +2343,72 @@ mod tests {
         bc[0] = 0x63; // PUSH4
         bc[1..5].copy_from_slice(&[0xaa, 0xaa, 0xaa, 0xaa]);
         bc[5] = EQ;
-        bc[6] = PUSH1; bc[7] = 0x40;
+        bc[6] = PUSH1;
+        bc[7] = 0x40;
         bc[8] = JUMPI;
         bc[9] = STOP;
 
         // Handler at 0x40: store selector in mem, STATICCALL to target, STOP
         let mut p = 0x40;
-        bc[p] = JUMPDEST; p += 1;
+        bc[p] = JUMPDEST;
+        p += 1;
         // MSTORE selector at mem[0x80]
-        bc[p] = PUSH32; p += 1;
+        bc[p] = PUSH32;
+        p += 1;
         let mut sw = [0u8; 32];
         sw[0..4].copy_from_slice(&sel_word);
-        bc[p..p+32].copy_from_slice(&sw); p += 32;
-        bc[p] = PUSH1; p += 1; bc[p] = 0x80; p += 1;
-        bc[p] = MSTORE; p += 1;
+        bc[p..p + 32].copy_from_slice(&sw);
+        p += 32;
+        bc[p] = PUSH1;
+        p += 1;
+        bc[p] = 0x80;
+        p += 1;
+        bc[p] = MSTORE;
+        p += 1;
         // STATICCALL(gas, target, argsOff=0x80, argsLen=4, retOff=0, retLen=0)
-        bc[p] = PUSH1; p += 1; bc[p] = 0x00; p += 1; // retLen
-        bc[p] = PUSH1; p += 1; bc[p] = 0x00; p += 1; // retOff
-        bc[p] = PUSH1; p += 1; bc[p] = 0x04; p += 1; // argsLen
-        bc[p] = PUSH1; p += 1; bc[p] = 0x80; p += 1; // argsOff
-        bc[p] = 0x73; p += 1; // PUSH20
-        bc[p..p+20].copy_from_slice(target.as_slice()); p += 20;
-        bc[p] = GAS; p += 1;
-        bc[p] = STATICCALL; p += 1;
+        bc[p] = PUSH1;
+        p += 1;
+        bc[p] = 0x00;
+        p += 1; // retLen
+        bc[p] = PUSH1;
+        p += 1;
+        bc[p] = 0x00;
+        p += 1; // retOff
+        bc[p] = PUSH1;
+        p += 1;
+        bc[p] = 0x04;
+        p += 1; // argsLen
+        bc[p] = PUSH1;
+        p += 1;
+        bc[p] = 0x80;
+        p += 1; // argsOff
+        bc[p] = 0x73;
+        p += 1; // PUSH20
+        bc[p..p + 20].copy_from_slice(target.as_slice());
+        p += 20;
+        bc[p] = GAS;
+        p += 1;
+        bc[p] = STATICCALL;
+        p += 1;
         bc[p] = STOP;
 
         let results = analyze_bytecode(&bc);
-        let sel_entry = results.iter().find(|r| r.selector == FixedBytes::from([0xaa, 0xaa, 0xaa, 0xaa]));
+        let sel_entry = results
+            .iter()
+            .find(|r| r.selector == FixedBytes::from([0xaa, 0xaa, 0xaa, 0xaa]));
         assert!(sel_entry.is_some(), "Should find selector entry");
         let items = &sel_entry.unwrap().items;
         // No SLOAD items expected (stateless)
         assert!(
-            !items.iter().any(|i| matches!(i, PrefetchItem::Storage { .. })),
+            !items
+                .iter()
+                .any(|i| matches!(i, PrefetchItem::Storage { .. })),
             "Stateless contract should not have Storage items",
         );
         // Should have Account item with selector
-        let acct = items.iter().find(|i| matches!(i, PrefetchItem::Account { address, .. } if *address == target));
+        let acct = items
+            .iter()
+            .find(|i| matches!(i, PrefetchItem::Account { address, .. } if *address == target));
         assert!(acct.is_some(), "Should have Account item for CALL target");
         match acct.unwrap() {
             PrefetchItem::Account { selector, .. } => {
@@ -2187,7 +2437,7 @@ mod tests {
         let handler_push_idx = code.len();
         code.extend_from_slice(&[0x61, 0x00, 0x00]); // PUSH2 placeholder
         code.push(0x57); // JUMPI
-        // Default: STOP
+                         // Default: STOP
         code.push(0x00);
 
         // Handler starts here
@@ -2199,13 +2449,14 @@ mod tests {
         // 6 consecutive guard checks:
         // Each: PUSH1 1 PUSH2 <after_revert> JUMPI PUSH1 0 PUSH1 0 REVERT JUMPDEST
         for _ in 0..6 {
-            code.push(0x60); code.push(0x01); // PUSH1 1 (nonzero = condition true)
+            code.push(0x60);
+            code.push(0x01); // PUSH1 1 (nonzero = condition true)
             let jump_push_idx = code.len();
             code.extend_from_slice(&[0x61, 0x00, 0x00]); // PUSH2 placeholder
             code.push(0x57); // JUMPI
-            // Fallthrough = REVERT
+                             // Fallthrough = REVERT
             code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0xfd]); // PUSH1 0 PUSH1 0 REVERT
-            // JUMPDEST (happy path target)
+                                                                     // JUMPDEST (happy path target)
             let jumpdest_pc = code.len();
             code[jump_push_idx + 1] = ((jumpdest_pc >> 8) & 0xff) as u8;
             code[jump_push_idx + 2] = (jumpdest_pc & 0xff) as u8;
@@ -2218,7 +2469,9 @@ mod tests {
         let analyzed = analyze_bytecode(&code);
 
         // Find the entry for our selector
-        let entry = analyzed.iter().find(|a| a.selector == FixedBytes::from(sel));
+        let entry = analyzed
+            .iter()
+            .find(|a| a.selector == FixedBytes::from(sel));
         assert!(entry.is_some(), "Should find selector 0x11223344");
 
         let items = &entry.unwrap().items;

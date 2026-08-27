@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use alloy_primitives::{Address, B256, Bytes, FixedBytes, keccak256};
+use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, B256};
 use dowse_types::{HintTable, PrefetchItem, Selector, SlotExpression};
 
 /// A single recorded trace of a contract call.
@@ -92,14 +92,20 @@ fn infer_items_for_group(
     for ((address, slot), count) in &slot_counts {
         if *count >= threshold {
             if *address == contract {
-                items.push(PrefetchItem::Storage {
-                    slot: SlotExpression::Concrete { value: *slot },
-                });
+                items.push(
+                    PrefetchItem::Storage {
+                        slot: SlotExpression::Concrete { value: *slot },
+                    }
+                    .with_confidence(*count as f64 / total as f64),
+                );
             } else {
-                items.push(PrefetchItem::ExternalStorage {
-                    address: *address,
-                    slot: SlotExpression::Concrete { value: *slot },
-                });
+                items.push(
+                    PrefetchItem::ExternalStorage {
+                        address: *address,
+                        slot: SlotExpression::Concrete { value: *slot },
+                    }
+                    .with_confidence(*count as f64 / total as f64),
+                );
             }
             fixed_slots.insert((*address, *slot));
         }
@@ -178,12 +184,18 @@ fn try_infer_mappings(
                         ],
                     };
                     if *address == contract {
-                        results.push(PrefetchItem::Storage { slot });
+                        results.push(
+                            PrefetchItem::Storage { slot }
+                                .with_confidence(matches as f64 / checked as f64),
+                        );
                     } else {
-                        results.push(PrefetchItem::ExternalStorage {
-                            address: *address,
-                            slot,
-                        });
+                        results.push(
+                            PrefetchItem::ExternalStorage {
+                                address: *address,
+                                slot,
+                            }
+                            .with_confidence(matches as f64 / checked as f64),
+                        );
                     }
                 }
             }
@@ -222,12 +234,18 @@ fn try_infer_mappings(
                     ],
                 };
                 if *address == contract {
-                    results.push(PrefetchItem::Storage { slot });
+                    results.push(
+                        PrefetchItem::Storage { slot }
+                            .with_confidence(matches as f64 / checked as f64),
+                    );
                 } else {
-                    results.push(PrefetchItem::ExternalStorage {
-                        address: *address,
-                        slot,
-                    });
+                    results.push(
+                        PrefetchItem::ExternalStorage {
+                            address: *address,
+                            slot,
+                        }
+                        .with_confidence(matches as f64 / checked as f64),
+                    );
                 }
             }
         }
@@ -269,10 +287,12 @@ mod tests {
             .collect();
 
         let table = infer_from_traces(&traces);
-        let items = table.lookup(addr, Some(FixedBytes::from([0xa9, 0x05, 0x9c, 0xbb]))).unwrap();
+        let items = table
+            .lookup(addr, Some(FixedBytes::from([0xa9, 0x05, 0x9c, 0xbb])))
+            .unwrap();
         assert_eq!(items.len(), 1);
         assert!(matches!(
-            &items[0],
+            items[0].scored().0,
             PrefetchItem::Storage { slot: SlotExpression::Concrete { value: s } } if *s == slot
         ));
     }
@@ -308,7 +328,7 @@ mod tests {
 
         // Should find a mapping pattern with CalldataWord at offset 4
         assert!(items.iter().any(|item| matches!(
-            item,
+            item.scored().0,
             PrefetchItem::Storage {
                 slot: SlotExpression::Keccak256 { inputs },
             } if inputs.len() == 2
@@ -332,9 +352,11 @@ mod tests {
             .collect();
 
         let table = infer_from_traces(&traces);
-        let items = table.lookup(contract, Some(FixedBytes::from([1, 2, 3, 4]))).unwrap();
+        let items = table
+            .lookup(contract, Some(FixedBytes::from([1, 2, 3, 4])))
+            .unwrap();
         assert!(matches!(
-            &items[0],
+            items[0].scored().0,
             PrefetchItem::ExternalStorage {
                 address,
                 slot: SlotExpression::Concrete { value }
@@ -364,9 +386,11 @@ mod tests {
             .collect();
 
         let table = infer_from_traces(&traces);
-        let items = table.lookup(contract, Some(FixedBytes::from(selector))).unwrap();
+        let items = table
+            .lookup(contract, Some(FixedBytes::from(selector)))
+            .unwrap();
         assert!(items.iter().any(|item| matches!(
-            item,
+            item.scored().0,
             PrefetchItem::ExternalStorage {
                 address,
                 slot: SlotExpression::Keccak256 { inputs }
@@ -398,10 +422,12 @@ mod tests {
             .collect();
 
         let table = infer_from_traces(&traces);
-        let items = table.lookup(contract, Some(FixedBytes::from(selector))).unwrap();
+        let items = table
+            .lookup(contract, Some(FixedBytes::from(selector)))
+            .unwrap();
 
         assert!(items.iter().any(|item| matches!(
-            item,
+            item.scored().0,
             PrefetchItem::ExternalStorage {
                 address,
                 slot: SlotExpression::Keccak256 { inputs }
@@ -430,12 +456,20 @@ mod tests {
             .collect();
 
         let table = infer_from_traces_with_threshold(&traces, 0.4);
-        let items = table.lookup(contract, Some(FixedBytes::from([1, 2, 3, 4]))).unwrap();
+        let items = table
+            .lookup(contract, Some(FixedBytes::from([1, 2, 3, 4])))
+            .unwrap();
 
-        assert!(items.iter().any(|item| matches!(
-            item,
-            PrefetchItem::Storage { slot: SlotExpression::Concrete { value } }
-                if *value == conditional
-        )));
+        let conditional = items
+            .iter()
+            .find(|item| {
+                matches!(
+                    item.scored().0,
+                    PrefetchItem::Storage { slot: SlotExpression::Concrete { value } }
+                        if *value == conditional
+                )
+            })
+            .expect("conditional slot should meet the configured threshold");
+        assert_eq!(conditional.scored().1, 0.4);
     }
 }

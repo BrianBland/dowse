@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use alloy_primitives::hex;
-use alloy_primitives::{Address, B256, FixedBytes};
+use alloy_primitives::{Address, FixedBytes, B256};
 use serde::{Deserialize, Serialize};
 
 /// Custom serialization for `SelectorMap` so that `None` (wildcard) keys
@@ -12,7 +12,10 @@ mod selector_map_serde {
     use serde::ser::SerializeMap;
     use std::fmt;
 
-    pub fn serialize<S>(map: &HashMap<Selector, Vec<PrefetchItem>>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(
+        map: &HashMap<Selector, Vec<PrefetchItem>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
@@ -35,7 +38,9 @@ mod selector_map_serde {
         m.end()
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<Selector, Vec<PrefetchItem>>, D::Error>
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<Selector, Vec<PrefetchItem>>, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
@@ -116,9 +121,16 @@ pub enum SlotExpression {
 /// [`PrefetchItem::Storage`] items are relative to their containing address context in the hint
 /// table — the target address is implicit from the `HintTable` key. External storage items carry
 /// their target address explicitly.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum PrefetchItem {
+    /// A target annotated with its predicted likelihood of being accessed.
+    /// Unscored items from v1 hint tables have an implicit confidence of 1.0.
+    Scored {
+        confidence: f64,
+        item: Box<PrefetchItem>,
+    },
+
     /// Load account info (balance, nonce, code hash) for an address.
     /// Used for cross-contract references (e.g., token addresses referenced by a router).
     /// When `selector` is present, the prefetcher can chain-lookup the target's
@@ -147,6 +159,35 @@ pub enum PrefetchItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         selector: Option<FixedBytes<4>>,
     },
+}
+
+impl PrefetchItem {
+    /// Annotates this item with a confidence score.
+    pub fn with_confidence(self, confidence: f64) -> Self {
+        Self::Scored {
+            confidence: normalize_confidence(confidence),
+            item: Box::new(self),
+        }
+    }
+
+    /// Returns the underlying target and its confidence.
+    pub fn scored(&self) -> (&Self, f64) {
+        match self {
+            Self::Scored { confidence, item } => {
+                let (item, nested) = item.scored();
+                (item, normalize_confidence(*confidence).min(nested))
+            }
+            item => (item, 1.0),
+        }
+    }
+}
+
+fn normalize_confidence(confidence: f64) -> f64 {
+    if confidence.is_finite() {
+        confidence.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// A selector key: either a specific 4-byte selector or a wildcard (None = any call).
@@ -196,12 +237,17 @@ mod hint_entries_serde {
     use serde::ser::SerializeMap;
     use std::fmt;
 
-    pub fn serialize<S>(entries: &HashMap<B256, SelectorMap>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(
+        entries: &HashMap<B256, SelectorMap>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         #[derive(Serialize)]
-        struct Wrapper<'a>(#[serde(serialize_with = "selector_map_serde::serialize")] &'a SelectorMap);
+        struct Wrapper<'a>(
+            #[serde(serialize_with = "selector_map_serde::serialize")] &'a SelectorMap,
+        );
 
         let mut hashes: Vec<&B256> = entries.keys().collect();
         hashes.sort();
@@ -232,7 +278,9 @@ mod hint_entries_serde {
                 M: MapAccess<'de>,
             {
                 #[derive(Deserialize)]
-                struct Wrapper(#[serde(deserialize_with = "selector_map_serde::deserialize")] SelectorMap);
+                struct Wrapper(
+                    #[serde(deserialize_with = "selector_map_serde::deserialize")] SelectorMap,
+                );
 
                 let mut map = HashMap::with_capacity(access.size_hint().unwrap_or(0));
                 while let Some((key, wrapper)) = access.next_entry::<String, Wrapper>()? {
@@ -277,7 +325,13 @@ impl HintTable {
 
     /// Insert prefetch items for an address + code_hash + selector.
     /// Records the address → code_hash mapping and stores entries under the code_hash.
-    pub fn insert(&mut self, address: Address, code_hash: B256, selector: Selector, items: Vec<PrefetchItem>) {
+    pub fn insert(
+        &mut self,
+        address: Address,
+        code_hash: B256,
+        selector: Selector,
+        items: Vec<PrefetchItem>,
+    ) {
         self.code_hashes.insert(address, code_hash);
         self.entries
             .entry(code_hash)
@@ -287,7 +341,12 @@ impl HintTable {
 
     /// Insert prefetch items by code hash only (no address association).
     /// Used when trimming or transforming entries without a specific address context.
-    pub fn insert_by_hash(&mut self, code_hash: B256, selector: Selector, items: Vec<PrefetchItem>) {
+    pub fn insert_by_hash(
+        &mut self,
+        code_hash: B256,
+        selector: Selector,
+        items: Vec<PrefetchItem>,
+    ) {
         self.entries
             .entry(code_hash)
             .or_default()
@@ -333,7 +392,8 @@ impl HintTable {
 
     /// All addresses associated with a given code hash.
     pub fn addresses_for_hash(&self, hash: &B256) -> Vec<Address> {
-        let mut addrs: Vec<Address> = self.code_hashes
+        let mut addrs: Vec<Address> = self
+            .code_hashes
             .iter()
             .filter(|(_, h)| *h == hash)
             .map(|(a, _)| *a)
@@ -442,7 +502,9 @@ mod tests {
                     address: SlotExpression::Keccak256 {
                         inputs: vec![
                             SlotExpression::CalldataWord { offset: 4 },
-                            SlotExpression::Concrete { value: B256::with_last_byte(1) },
+                            SlotExpression::Concrete {
+                                value: B256::with_last_byte(1),
+                            },
                         ],
                     },
                     selector: None,
@@ -467,7 +529,10 @@ mod tests {
             addr,
             DUMMY_HASH,
             None,
-            vec![PrefetchItem::Account { address: addr, selector: None }],
+            vec![PrefetchItem::Account {
+                address: addr,
+                selector: None,
+            }],
         );
 
         // Should find via wildcard
@@ -562,11 +627,33 @@ mod tests {
 
         let external = PrefetchItem::ExternalStorage {
             address: Address::repeat_byte(0x11),
-            slot: SlotExpression::Concrete { value: B256::with_last_byte(1) },
+            slot: SlotExpression::Concrete {
+                value: B256::with_last_byte(1),
+            },
         };
         let json = serde_json::to_string(&external).unwrap();
         assert!(json.contains(r#""kind":"ExternalStorage""#));
-        assert_eq!(serde_json::from_str::<PrefetchItem>(&json).unwrap(), external);
+        assert_eq!(
+            serde_json::from_str::<PrefetchItem>(&json).unwrap(),
+            external
+        );
+    }
+
+    #[test]
+    fn serde_defaults_v1_items_to_full_confidence_and_roundtrips_scores() {
+        let legacy: PrefetchItem = serde_json::from_str(
+            r#"{"kind":"Storage","slot":{"type":"Concrete","value":"0x0000000000000000000000000000000000000000000000000000000000000001"}}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.scored().1, 1.0);
+
+        let scored = legacy.clone().with_confidence(0.625);
+        let json = serde_json::to_string(&scored).unwrap();
+        let restored: PrefetchItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.scored().1, 0.625);
+
+        assert_eq!(legacy.clone().with_confidence(f64::NAN).scored().1, 0.0);
+        assert_eq!(legacy.with_confidence(2.0).scored().1, 1.0);
     }
 
     /// Wildcard (None) selector keys must serialize as "*" and roundtrip.
@@ -582,7 +669,9 @@ mod tests {
             DUMMY_HASH,
             None,
             vec![PrefetchItem::Storage {
-                slot: SlotExpression::Concrete { value: B256::with_last_byte(99) },
+                slot: SlotExpression::Concrete {
+                    value: B256::with_last_byte(99),
+                },
             }],
         );
         table.insert(
@@ -590,16 +679,24 @@ mod tests {
             DUMMY_HASH,
             Some(FixedBytes::from([0xaa, 0xbb, 0xcc, 0xdd])),
             vec![PrefetchItem::Storage {
-                slot: SlotExpression::Concrete { value: B256::with_last_byte(1) },
+                slot: SlotExpression::Concrete {
+                    value: B256::with_last_byte(1),
+                },
             }],
         );
 
         let json = serde_json::to_string_pretty(&table).unwrap();
 
         // Wildcard should serialize as "*"
-        assert!(json.contains("\"*\""), "Wildcard key should serialize as \"*\", got:\n{json}");
+        assert!(
+            json.contains("\"*\""),
+            "Wildcard key should serialize as \"*\", got:\n{json}"
+        );
         // Specific selector should serialize as hex
-        assert!(json.contains("\"0xaabbccdd\""), "Selector key should serialize as hex, got:\n{json}");
+        assert!(
+            json.contains("\"0xaabbccdd\""),
+            "Selector key should serialize as hex, got:\n{json}"
+        );
 
         // Roundtrip
         let restored: HintTable = serde_json::from_str(&json).unwrap();
@@ -608,7 +705,9 @@ mod tests {
 
         // Lookup should work on restored table
         assert!(restored.lookup(addr, None).is_some());
-        assert!(restored.lookup(addr, Some(FixedBytes::from([0xaa, 0xbb, 0xcc, 0xdd]))).is_some());
+        assert!(restored
+            .lookup(addr, Some(FixedBytes::from([0xaa, 0xbb, 0xcc, 0xdd])))
+            .is_some());
     }
 
     /// Account items with selector field must roundtrip through JSON.
@@ -623,7 +722,10 @@ mod tests {
             DUMMY_HASH,
             Some(FixedBytes::from([0xaa, 0xbb, 0xcc, 0xdd])),
             vec![
-                PrefetchItem::Account { address: target, selector: None },
+                PrefetchItem::Account {
+                    address: target,
+                    selector: None,
+                },
                 PrefetchItem::Account {
                     address: target,
                     selector: Some(FixedBytes::from([0x70, 0xa0, 0x82, 0x31])),
@@ -635,13 +737,23 @@ mod tests {
 
         // selector: None should be omitted (skip_serializing_if)
         // selector: Some should be present
-        assert!(json.contains("0x70a08231"), "Account selector should appear in JSON");
+        assert!(
+            json.contains("0x70a08231"),
+            "Account selector should appear in JSON"
+        );
 
         let restored: HintTable = serde_json::from_str(&json).unwrap();
-        let items = restored.lookup(addr, Some(FixedBytes::from([0xaa, 0xbb, 0xcc, 0xdd]))).unwrap();
+        let items = restored
+            .lookup(addr, Some(FixedBytes::from([0xaa, 0xbb, 0xcc, 0xdd])))
+            .unwrap();
         assert_eq!(items.len(), 2);
-        assert!(matches!(&items[0], PrefetchItem::Account { selector: None, .. }));
-        assert!(matches!(&items[1], PrefetchItem::Account { selector: Some(s), .. } if *s == FixedBytes::from([0x70, 0xa0, 0x82, 0x31])));
+        assert!(matches!(
+            &items[0],
+            PrefetchItem::Account { selector: None, .. }
+        ));
+        assert!(
+            matches!(&items[1], PrefetchItem::Account { selector: Some(s), .. } if *s == FixedBytes::from([0x70, 0xa0, 0x82, 0x31]))
+        );
     }
 
     /// Serializing the same table twice must produce identical output (deterministic ordering).
@@ -659,29 +771,48 @@ mod tests {
             addr_a,
             hash_a,
             Some(FixedBytes::from([0xdd, 0xcc, 0xbb, 0xaa])),
-            vec![PrefetchItem::Storage { slot: SlotExpression::Concrete { value: B256::with_last_byte(1) } }],
+            vec![PrefetchItem::Storage {
+                slot: SlotExpression::Concrete {
+                    value: B256::with_last_byte(1),
+                },
+            }],
         );
         table.insert(
             addr_a,
             hash_a,
             Some(FixedBytes::from([0x11, 0x22, 0x33, 0x44])),
-            vec![PrefetchItem::Storage { slot: SlotExpression::Concrete { value: B256::with_last_byte(2) } }],
+            vec![PrefetchItem::Storage {
+                slot: SlotExpression::Concrete {
+                    value: B256::with_last_byte(2),
+                },
+            }],
         );
         table.insert(
             addr_a,
             hash_a,
             None,
-            vec![PrefetchItem::Storage { slot: SlotExpression::Concrete { value: B256::with_last_byte(3) } }],
+            vec![PrefetchItem::Storage {
+                slot: SlotExpression::Concrete {
+                    value: B256::with_last_byte(3),
+                },
+            }],
         );
         table.insert(
             addr_b,
             hash_b,
             Some(FixedBytes::from([0xff, 0xee, 0xdd, 0xcc])),
-            vec![PrefetchItem::Storage { slot: SlotExpression::Concrete { value: B256::with_last_byte(4) } }],
+            vec![PrefetchItem::Storage {
+                slot: SlotExpression::Concrete {
+                    value: B256::with_last_byte(4),
+                },
+            }],
         );
 
         let json1 = serde_json::to_string_pretty(&table).unwrap();
         let json2 = serde_json::to_string_pretty(&table).unwrap();
-        assert_eq!(json1, json2, "Two serializations of the same table must be identical");
+        assert_eq!(
+            json1, json2,
+            "Two serializations of the same table must be identical"
+        );
     }
 }

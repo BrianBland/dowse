@@ -29,16 +29,18 @@ pub fn trim_hint_table(table: &HintTable, min_dynamic_items: usize) -> HintTable
 
             let dynamic_count = valuable
                 .iter()
-                .filter(|item| matches!(
-                    item,
-                    PrefetchItem::Storage { slot } if is_dynamic_slot(slot)
-                ) || matches!(
-                    item,
-                    PrefetchItem::ExternalStorage { slot, .. } if is_dynamic_slot(slot)
-                ) || matches!(
-                    item,
-                    PrefetchItem::ComputedAccount { address, .. } if is_dynamic_slot(address)
-                ))
+                .filter(|item| {
+                    matches!(
+                        item,
+                        PrefetchItem::Storage { slot } if is_dynamic_slot(slot)
+                    ) || matches!(
+                        item,
+                        PrefetchItem::ExternalStorage { slot, .. } if is_dynamic_slot(slot)
+                    ) || matches!(
+                        item,
+                        PrefetchItem::ComputedAccount { address, .. } if is_dynamic_slot(address)
+                    )
+                })
                 .count();
 
             if dynamic_count >= min_dynamic_items
@@ -55,6 +57,7 @@ pub fn trim_hint_table(table: &HintTable, min_dynamic_items: usize) -> HintTable
 /// Is this prefetch item worth the overhead of concurrent fetching?
 pub fn is_valuable_item(item: &PrefetchItem) -> bool {
     match item {
+        PrefetchItem::Scored { item, .. } => is_valuable_item(item),
         PrefetchItem::Account { .. } => true,
         PrefetchItem::Storage { slot } => is_dynamic_slot(slot),
         PrefetchItem::ExternalStorage { slot, .. } => is_dynamic_slot(slot),
@@ -76,7 +79,7 @@ pub fn is_dynamic_slot(expr: &SlotExpression) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, B256, FixedBytes};
+    use alloy_primitives::{address, FixedBytes, B256};
 
     const DUMMY_HASH: B256 = B256::repeat_byte(0xAB);
 
@@ -90,15 +93,11 @@ mod tests {
         assert!(is_dynamic_slot(&SlotExpression::Keccak256 {
             inputs: vec![
                 SlotExpression::CalldataWord { offset: 4 },
-                SlotExpression::Concrete {
-                    value: B256::ZERO
-                },
+                SlotExpression::Concrete { value: B256::ZERO },
             ],
         }));
         assert!(!is_dynamic_slot(&SlotExpression::Keccak256 {
-            inputs: vec![SlotExpression::Concrete {
-                value: B256::ZERO
-            }],
+            inputs: vec![SlotExpression::Concrete { value: B256::ZERO }],
         }));
     }
 
@@ -113,9 +112,7 @@ mod tests {
             DUMMY_HASH,
             Some(FixedBytes::from([0xaa, 0xaa, 0xaa, 0xaa])),
             vec![PrefetchItem::Storage {
-                slot: SlotExpression::Concrete {
-                    value: B256::ZERO,
-                },
+                slot: SlotExpression::Concrete { value: B256::ZERO },
             }],
         );
 
@@ -128,9 +125,7 @@ mod tests {
                 slot: SlotExpression::Keccak256 {
                     inputs: vec![
                         SlotExpression::CalldataWord { offset: 4 },
-                        SlotExpression::Concrete {
-                            value: B256::ZERO,
-                        },
+                        SlotExpression::Concrete { value: B256::ZERO },
                     ],
                 },
             }],
@@ -150,7 +145,10 @@ mod tests {
             addr,
             DUMMY_HASH,
             Some(FixedBytes::from([0xaa, 0xaa, 0xaa, 0xaa])),
-            vec![PrefetchItem::Account { address: target, selector: None }],
+            vec![PrefetchItem::Account {
+                address: target,
+                selector: None,
+            }],
         );
 
         // min_dynamic_items=0 keeps non-empty selectors

@@ -9,7 +9,7 @@ use alloy_primitives::{Address, B256};
 use alloy_provider::{Provider, ProviderBuilder};
 use clap::{Parser, Subcommand, ValueEnum};
 use dowse_analyze::bytecode::{analyze_bytecode, analyzed_to_entries};
-use dowse_analyze::trace::{TraceRecord, infer_from_traces_with_threshold};
+use dowse_analyze::trace::{infer_from_traces_with_threshold, TraceRecord};
 use dowse_core::proxy;
 use dowse_core::score::score_hints_batch;
 use dowse_types::{HintTable, PrefetchItem, RecordedAccess};
@@ -157,11 +157,29 @@ async fn main() {
             format,
             output,
         } => {
-            cmd_generate(address, bytecode, rpc_url, no_proxy, recursive, depth, &format, output.as_deref()).await;
+            cmd_generate(
+                address,
+                bytecode,
+                rpc_url,
+                no_proxy,
+                recursive,
+                depth,
+                &format,
+                output.as_deref(),
+            )
+            .await;
         }
-        Commands::Infer { traces, fixed_slot_min_frequency, format, output } => {
-            cmd_infer(&traces, fixed_slot_min_frequency, &format, output.as_deref())
-        }
+        Commands::Infer {
+            traces,
+            fixed_slot_min_frequency,
+            format,
+            output,
+        } => cmd_infer(
+            &traces,
+            fixed_slot_min_frequency,
+            &format,
+            output.as_deref(),
+        ),
         Commands::Validate { hints, traces } => cmd_validate(&hints, &traces),
         Commands::Inspect { hints, format } => cmd_inspect(&hints, &format),
         Commands::Merge { files, output } => cmd_merge(&files, output.as_deref()),
@@ -206,7 +224,12 @@ async fn cmd_generate(
                 .parse()
                 .expect("Invalid address");
             let code_hash = alloy_primitives::keccak256(&bytes);
-            FetchResult { bytecode: bytes, proxy_bytecode: None, hint_address: addr, code_hash }
+            FetchResult {
+                bytecode: bytes,
+                proxy_bytecode: None,
+                hint_address: addr,
+                code_hash,
+            }
         }
         // Fetch from RPC
         (None, Some(addr_str), Some(url)) => {
@@ -230,9 +253,24 @@ async fn cmd_generate(
         let rpc_url = rpc_url.as_deref().expect("--recursive requires --rpc-url");
         let mut visited = HashSet::new();
         let mut analyzed_hashes = HashSet::new();
-        let mut table = analyze_recursive(rpc_url, hint_address, code_hash, &fetch_result.bytecode, no_proxy, depth, &mut visited, &mut analyzed_hashes).await;
+        let mut table = analyze_recursive(
+            rpc_url,
+            hint_address,
+            code_hash,
+            &fetch_result.bytecode,
+            no_proxy,
+            depth,
+            &mut visited,
+            &mut analyzed_hashes,
+        )
+        .await;
         // Also analyze proxy bytecode — captures proxy-level SLOADs and CALLs
-        merge_proxy_analysis(&mut table, hint_address, code_hash, fetch_result.proxy_bytecode.as_deref());
+        merge_proxy_analysis(
+            &mut table,
+            hint_address,
+            code_hash,
+            fetch_result.proxy_bytecode.as_deref(),
+        );
         write_table(&table, fmt, output);
     } else {
         let analyzed = analyze_bytecode(&fetch_result.bytecode);
@@ -245,7 +283,12 @@ async fn cmd_generate(
         for (selector, items) in entries {
             table.insert(hint_address, code_hash, selector, items);
         }
-        merge_proxy_analysis(&mut table, hint_address, code_hash, fetch_result.proxy_bytecode.as_deref());
+        merge_proxy_analysis(
+            &mut table,
+            hint_address,
+            code_hash,
+            fetch_result.proxy_bytecode.as_deref(),
+        );
 
         write_table(&table, fmt, output);
     }
@@ -258,12 +301,18 @@ async fn cmd_generate(
 /// the proxy's own bytecode should be analyzed. The proxy bytecode typically SLOADs
 /// the implementation address and may contain other operations invisible to the
 /// implementation analysis alone.
-fn merge_proxy_analysis(table: &mut HintTable, address: Address, code_hash: B256, proxy_bytecode: Option<&[u8]>) {
+fn merge_proxy_analysis(
+    table: &mut HintTable,
+    address: Address,
+    code_hash: B256,
+    proxy_bytecode: Option<&[u8]>,
+) {
     if let Some(proxy_code) = proxy_bytecode {
         let proxy_analyzed = analyze_bytecode(proxy_code);
         let proxy_entries = analyzed_to_entries(&proxy_analyzed);
         for (selector, mut items) in proxy_entries {
-            table.entries
+            table
+                .entries
                 .entry(code_hash)
                 .or_default()
                 .entry(selector)
@@ -310,7 +359,11 @@ async fn analyze_recursive(
     let mut targets: Vec<Address> = Vec::new();
     for (_selector, items) in &entries {
         for item in items {
-            if let PrefetchItem::Account { address: target, .. } = item {
+            let (item, _) = item.scored();
+            if let PrefetchItem::Account {
+                address: target, ..
+            } = item
+            {
                 if !visited.contains(target) {
                     targets.push(*target);
                 }
@@ -355,7 +408,12 @@ async fn analyze_recursive(
             ))
             .await;
             // Also analyze proxy bytecode for this child target
-            merge_proxy_analysis(&mut child_table, target, fetch.code_hash, fetch.proxy_bytecode.as_deref());
+            merge_proxy_analysis(
+                &mut child_table,
+                target,
+                fetch.code_hash,
+                fetch.proxy_bytecode.as_deref(),
+            );
             table.merge(child_table);
         }
     }
@@ -382,8 +440,7 @@ struct FetchResult {
 /// Returns a `FetchResult` with the implementation bytecode, optional proxy bytecode,
 /// and the hint address (always the original/proxy address, since callers target it).
 async fn fetch_bytecode(address: Address, rpc_url: &str, no_proxy: bool) -> FetchResult {
-    let provider = ProviderBuilder::new()
-        .connect_http(rpc_url.parse().expect("Invalid RPC URL"));
+    let provider = ProviderBuilder::new().connect_http(rpc_url.parse().expect("Invalid RPC URL"));
 
     eprintln!("Fetching bytecode for {address} from {rpc_url} ...");
 
@@ -401,7 +458,12 @@ async fn fetch_bytecode(address: Address, rpc_url: &str, no_proxy: bool) -> Fetc
 
     if no_proxy {
         let code_hash = alloy_primitives::keccak256(&code);
-        return FetchResult { bytecode: code.to_vec(), proxy_bytecode: None, hint_address: address, code_hash };
+        return FetchResult {
+            bytecode: code.to_vec(),
+            proxy_bytecode: None,
+            hint_address: address,
+            code_hash,
+        };
     }
 
     // Async proxy detection using the same slot constants from dowse_core::proxy
@@ -412,23 +474,42 @@ async fn fetch_bytecode(address: Address, rpc_url: &str, no_proxy: bool) -> Fetc
     match result {
         Some(proxy::ProxyResult::Implementation(impl_addr)) => {
             eprintln!("Detected proxy -> implementation at {impl_addr}");
-            let (impl_code, hint_addr) = fetch_impl_bytecode(&provider, impl_addr, &code, address).await;
+            let (impl_code, hint_addr) =
+                fetch_impl_bytecode(&provider, impl_addr, &code, address).await;
             let code_hash = alloy_primitives::keccak256(&impl_code);
-            FetchResult { bytecode: impl_code, proxy_bytecode: Some(code.to_vec()), hint_address: hint_addr, code_hash }
+            FetchResult {
+                bytecode: impl_code,
+                proxy_bytecode: Some(code.to_vec()),
+                hint_address: hint_addr,
+                code_hash,
+            }
         }
         Some(proxy::ProxyResult::Beacon {
             beacon,
             implementation,
         }) => {
-            eprintln!("Detected beacon proxy -> beacon at {beacon} -> implementation at {implementation}");
-            let (impl_code, hint_addr) = fetch_impl_bytecode(&provider, implementation, &code, address).await;
+            eprintln!(
+                "Detected beacon proxy -> beacon at {beacon} -> implementation at {implementation}"
+            );
+            let (impl_code, hint_addr) =
+                fetch_impl_bytecode(&provider, implementation, &code, address).await;
             let code_hash = alloy_primitives::keccak256(&impl_code);
-            FetchResult { bytecode: impl_code, proxy_bytecode: Some(code.to_vec()), hint_address: hint_addr, code_hash }
+            FetchResult {
+                bytecode: impl_code,
+                proxy_bytecode: Some(code.to_vec()),
+                hint_address: hint_addr,
+                code_hash,
+            }
         }
         None => {
             eprintln!("No proxy pattern detected, analyzing bytecode directly");
             let code_hash = alloy_primitives::keccak256(&code);
-            FetchResult { bytecode: code.to_vec(), proxy_bytecode: None, hint_address: address, code_hash }
+            FetchResult {
+                bytecode: code.to_vec(),
+                proxy_bytecode: None,
+                hint_address: address,
+                code_hash,
+            }
         }
     }
 }
@@ -440,8 +521,7 @@ async fn try_fetch_bytecode(
     rpc_url: &str,
     no_proxy: bool,
 ) -> Option<FetchResult> {
-    let provider = ProviderBuilder::new()
-        .connect_http(rpc_url.parse().expect("Invalid RPC URL"));
+    let provider = ProviderBuilder::new().connect_http(rpc_url.parse().expect("Invalid RPC URL"));
 
     eprintln!("Fetching bytecode for {address} ...");
 
@@ -458,7 +538,12 @@ async fn try_fetch_bytecode(
 
     if no_proxy {
         let code_hash = alloy_primitives::keccak256(&code);
-        return Some(FetchResult { bytecode: code.to_vec(), proxy_bytecode: None, hint_address: address, code_hash });
+        return Some(FetchResult {
+            bytecode: code.to_vec(),
+            proxy_bytecode: None,
+            hint_address: address,
+            code_hash,
+        });
     }
 
     eprintln!("Checking for proxy patterns...");
@@ -467,23 +552,42 @@ async fn try_fetch_bytecode(
     Some(match result {
         Some(proxy::ProxyResult::Implementation(impl_addr)) => {
             eprintln!("Detected proxy -> implementation at {impl_addr}");
-            let (impl_code, hint_addr) = fetch_impl_bytecode(&provider, impl_addr, &code, address).await;
+            let (impl_code, hint_addr) =
+                fetch_impl_bytecode(&provider, impl_addr, &code, address).await;
             let code_hash = alloy_primitives::keccak256(&impl_code);
-            FetchResult { bytecode: impl_code, proxy_bytecode: Some(code.to_vec()), hint_address: hint_addr, code_hash }
+            FetchResult {
+                bytecode: impl_code,
+                proxy_bytecode: Some(code.to_vec()),
+                hint_address: hint_addr,
+                code_hash,
+            }
         }
         Some(proxy::ProxyResult::Beacon {
             beacon,
             implementation,
         }) => {
-            eprintln!("Detected beacon proxy -> beacon at {beacon} -> implementation at {implementation}");
-            let (impl_code, hint_addr) = fetch_impl_bytecode(&provider, implementation, &code, address).await;
+            eprintln!(
+                "Detected beacon proxy -> beacon at {beacon} -> implementation at {implementation}"
+            );
+            let (impl_code, hint_addr) =
+                fetch_impl_bytecode(&provider, implementation, &code, address).await;
             let code_hash = alloy_primitives::keccak256(&impl_code);
-            FetchResult { bytecode: impl_code, proxy_bytecode: Some(code.to_vec()), hint_address: hint_addr, code_hash }
+            FetchResult {
+                bytecode: impl_code,
+                proxy_bytecode: Some(code.to_vec()),
+                hint_address: hint_addr,
+                code_hash,
+            }
         }
         None => {
             let code_hash = alloy_primitives::keccak256(&code);
-            FetchResult { bytecode: code.to_vec(), proxy_bytecode: None, hint_address: address, code_hash }
-        },
+            FetchResult {
+                bytecode: code.to_vec(),
+                proxy_bytecode: None,
+                hint_address: address,
+                code_hash,
+            }
+        }
     })
 }
 
@@ -708,8 +812,7 @@ fn write_table_to(table: &HintTable, fmt: &OutputFormat, w: &mut impl std::io::W
             write_human(table, w).expect("Failed to write human output");
         }
         OutputFormat::Json => {
-            let json =
-                serde_json::to_string_pretty(table).expect("Failed to serialize hint table");
+            let json = serde_json::to_string_pretty(table).expect("Failed to serialize hint table");
             w.write_all(json.as_bytes())
                 .expect("Failed to write JSON output");
             w.write_all(b"\n").ok();

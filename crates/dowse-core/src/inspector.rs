@@ -56,6 +56,7 @@ where
                 };
                 let db = context.db_mut();
                 for item in items {
+                    let (item, _) = item.scored();
                     match item {
                         PrefetchItem::Account { address, selector } => {
                             match db.basic(*address) {
@@ -66,6 +67,7 @@ where
                             if let Some(sel) = selector {
                                 if let Some(child_items) = self.hints.lookup(*address, Some(*sel)) {
                                     for child in child_items {
+                                        let (child, _) = child.scored();
                                         // Only chain Storage items to avoid infinite recursion
                                         if let PrefetchItem::Storage { slot } = child {
                                             if let Some(key) = resolve_slot(slot, &ctx) {
@@ -99,7 +101,10 @@ where
                                 self.stats.items_failed += 1;
                             }
                         }
-                        PrefetchItem::ComputedAccount { address: expr, selector } => {
+                        PrefetchItem::ComputedAccount {
+                            address: expr,
+                            selector,
+                        } => {
                             if let Some(key) = resolve_slot(expr, &ctx) {
                                 let addr = Address::from_word(key.into());
                                 match db.basic(addr) {
@@ -110,6 +115,7 @@ where
                                 if let Some(sel) = selector {
                                     if let Some(child_items) = self.hints.lookup(addr, Some(*sel)) {
                                         for child in child_items {
+                                            let (child, _) = child.scored();
                                             // Only chain Storage items to avoid infinite recursion
                                             if let PrefetchItem::Storage { slot } = child {
                                                 if let Some(child_key) = resolve_slot(slot, &ctx) {
@@ -126,6 +132,7 @@ where
                                 self.stats.items_failed += 1;
                             }
                         }
+                        PrefetchItem::Scored { .. } => unreachable!("scored() removes wrappers"),
                     }
                 }
             }

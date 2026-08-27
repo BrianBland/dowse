@@ -63,6 +63,7 @@ fn resolve_predicted(
 
     let mut result = Vec::new();
     for item in items {
+        let (item, _) = item.scored();
         match item {
             PrefetchItem::Account { address, .. } => {
                 result.push(RecordedAccess::Account(*address));
@@ -89,6 +90,7 @@ fn resolve_predicted(
                     result.push(RecordedAccess::Account(addr));
                 }
             }
+            PrefetchItem::Scored { .. } => unreachable!("scored() removes wrappers"),
         }
     }
     result

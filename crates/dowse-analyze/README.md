@@ -27,6 +27,7 @@ same state.
 
 `analyzed_to_entries` converts the result into `(Selector, Vec<PrefetchItem>)` pairs
 ready for insertion into a `HintTable`.
+Each emitted item retains the analyzer's selector confidence.
 
 ## Trace inference (`trace` module)
 
@@ -34,6 +35,7 @@ ready for insertion into a `HintTable`.
 execution data. `infer_from_traces_with_threshold` allows trading additional concrete-slot
 coverage for speculative reads. This is useful when bytecode analysis alone doesn't capture
 all accessed slots (e.g. behind complex dispatch logic).
+Emitted items carry their observed frequency or mapping-match ratio as confidence.
 
 Algorithm per `(address, selector)` group:
 1. **Fixed slots** — slots appearing in ≥80% of traces → `Concrete` items.
