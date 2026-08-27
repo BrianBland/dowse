@@ -64,6 +64,41 @@ impl PrefetchPlan {
     pub fn target_count(&self) -> usize {
         self.accounts.len() + self.storage.len()
     }
+
+    /// Merges plans, retaining the highest confidence for duplicate targets and applying limits
+    /// after all sources have contributed.
+    pub fn merge(plans: impl IntoIterator<Item = Self>, limits: PlanLimits) -> Self {
+        let mut merged = Self::default();
+        let mut accounts = HashMap::new();
+        let mut storage = HashMap::new();
+
+        for plan in plans {
+            merged.diagnostics.unresolved_items += plan.diagnostics.unresolved_items;
+            merged.diagnostics.truncated_items += plan.diagnostics.truncated_items;
+            merged.diagnostics.duplicate_items += plan.diagnostics.duplicate_items;
+
+            for (address, confidence) in plan.accounts.into_iter().zip(plan.account_confidence) {
+                push_account(&mut merged, &mut accounts, address, confidence);
+            }
+            for (target, confidence) in plan.storage.into_iter().zip(plan.storage_confidence) {
+                push_storage(&mut merged, &mut storage, target, confidence);
+            }
+        }
+
+        prioritize_targets(
+            &mut merged.accounts,
+            &mut merged.account_confidence,
+            limits.accounts,
+            &mut merged.diagnostics,
+        );
+        prioritize_targets(
+            &mut merged.storage,
+            &mut merged.storage_confidence,
+            limits.storage_slots,
+            &mut merged.diagnostics,
+        );
+        merged
+    }
 }
 
 /// Resolves a hint table against transaction context without reading state.
@@ -529,5 +564,40 @@ mod tests {
         assert!(PrefetchPlanner::new(&hints, PlanLimits::new(1, 1))
             .plan(TARGET, CALLER, &calldata(B256::ZERO))
             .is_none());
+    }
+
+    #[test]
+    fn merges_sources_before_deduplicating_and_bounding() {
+        let low_slot = StorageTarget {
+            address: TARGET,
+            slot: B256::with_last_byte(1),
+        };
+        let high_slot = StorageTarget {
+            address: TARGET,
+            slot: B256::with_last_byte(2),
+        };
+        let first = PrefetchPlan {
+            accounts: vec![ACCOUNT],
+            storage: vec![low_slot, high_slot],
+            account_confidence: vec![0.2],
+            storage_confidence: vec![0.3, 0.8],
+            diagnostics: PlanDiagnostics::default(),
+        };
+        let second = PrefetchPlan {
+            accounts: vec![ACCOUNT],
+            storage: vec![low_slot],
+            account_confidence: vec![1.0],
+            storage_confidence: vec![0.9],
+            diagnostics: PlanDiagnostics::default(),
+        };
+
+        let merged = PrefetchPlan::merge([first, second], PlanLimits::new(1, 1));
+
+        assert_eq!(merged.accounts, vec![ACCOUNT]);
+        assert_eq!(merged.account_confidence, vec![1.0]);
+        assert_eq!(merged.storage, vec![low_slot]);
+        assert_eq!(merged.storage_confidence, vec![0.9]);
+        assert_eq!(merged.diagnostics.duplicate_items, 2);
+        assert_eq!(merged.diagnostics.truncated_items, 1);
     }
 }

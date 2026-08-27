@@ -1,0 +1,8 @@
+[package]
+name = "dowse-decode"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dowse-plan = { path = "../dowse-plan" }
+alloy-primitives = { workspace = true }

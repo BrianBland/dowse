@@ -1,18 +1,20 @@
 mod format;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{address, Address, B256};
 use alloy_provider::{Provider, ProviderBuilder};
 use clap::{Parser, Subcommand, ValueEnum};
 use dowse_analyze::bytecode::{analyze_bytecode, analyzed_to_entries};
 use dowse_analyze::trace::{infer_from_traces_with_threshold, OnlineHintLearner, TraceRecord};
 use dowse_core::proxy;
 use dowse_core::score::score_hints_batch;
+use dowse_decode::BaseMainnetDecoder;
+use dowse_plan::{PlanLimits, PrefetchPlanner};
 use dowse_types::{HintTable, PrefetchItem, RecordedAccess};
 
 use format::{read_binary, write_binary, write_human};
@@ -121,6 +123,21 @@ enum Commands {
         traces: PathBuf,
     },
 
+    /// Score Base protocol decoders alone and combined with a hint table
+    ScoreDecoders {
+        /// Path to hint table JSON file
+        #[arg(long)]
+        hints: PathBuf,
+
+        /// Paths to trace JSON or JSONL files; repeat the flag to combine files
+        #[arg(long, required = true)]
+        traces: Vec<PathBuf>,
+
+        /// Minimum hint-table confidence admitted, in basis points
+        #[arg(long, default_value = "2000")]
+        min_confidence_bps: u16,
+    },
+
     /// Pretty-print a hint table
     Inspect {
         /// Path to hint table JSON file
@@ -212,6 +229,11 @@ async fn main() {
             output.as_deref(),
         ),
         Commands::Validate { hints, traces } => cmd_validate(&hints, &traces),
+        Commands::ScoreDecoders {
+            hints,
+            traces,
+            min_confidence_bps,
+        } => cmd_score_decoders(&hints, &traces, min_confidence_bps),
         Commands::Inspect { hints, format } => cmd_inspect(&hints, &format),
         Commands::Merge { files, output } => cmd_merge(&files, output.as_deref()),
         Commands::Convert {
@@ -779,6 +801,249 @@ fn cmd_validate(hints_path: &std::path::Path, traces_path: &std::path::Path) {
     println!("  Uncovered: {}", score.uncovered);
     println!("  Precision: {:.1}%", score.precision() * 100.0);
     println!("  Recall:    {:.1}%", score.recall() * 100.0);
+}
+
+#[derive(Default)]
+struct PredictionScore {
+    hits: u64,
+    misses: u64,
+    uncovered: u64,
+}
+
+impl PredictionScore {
+    fn observe(&mut self, predicted: &HashSet<(Address, B256)>, actual: &HashSet<(Address, B256)>) {
+        self.hits += predicted.intersection(actual).count() as u64;
+        self.misses += predicted.difference(actual).count() as u64;
+        self.uncovered += actual.difference(predicted).count() as u64;
+    }
+
+    fn print(&self, label: &str) {
+        let precision = self.hits as f64 / (self.hits + self.misses).max(1) as f64;
+        let recall = self.hits as f64 / (self.hits + self.uncovered).max(1) as f64;
+        println!(
+            "  {label:<18} hits={:<10} misses={:<10} uncovered={:<10} precision={:>6.2}% recall={:>6.2}%",
+            self.hits,
+            self.misses,
+            self.uncovered,
+            precision * 100.0,
+            recall * 100.0,
+        );
+    }
+
+    fn print_precision(&self, label: &str) {
+        let precision = self.hits as f64 / (self.hits + self.misses).max(1) as f64;
+        println!(
+            "  {label:<18} hits={:<10} misses={:<10} precision={:>6.2}%",
+            self.hits,
+            self.misses,
+            precision * 100.0,
+        );
+    }
+}
+
+fn cmd_score_decoders(
+    hints_path: &std::path::Path,
+    trace_paths: &[PathBuf],
+    min_confidence_bps: u16,
+) {
+    assert!(
+        min_confidence_bps <= 10_000,
+        "minimum confidence must not exceed 10000 bps"
+    );
+    let hints_json = fs::read_to_string(hints_path).expect("Failed to read hints file");
+    let hints: HintTable = serde_json::from_str(&hints_json).expect("Failed to parse hints JSON");
+    let limits = PlanLimits::new(usize::MAX, usize::MAX);
+    let planner = PrefetchPlanner::new(&hints, limits);
+    let decoder = BaseMainnetDecoder::new(limits);
+    let mut historical_score = PredictionScore::default();
+    let mut decoder_score = PredictionScore::default();
+    let mut combined_score = PredictionScore::default();
+    let mut added_score = PredictionScore::default();
+    let mut traces = 0u64;
+    let mut decoded_traces = 0u64;
+    let mut additions_by_call = BTreeMap::<&'static str, PredictionScore>::new();
+    let mut additions_by_state = BTreeMap::<&'static str, PredictionScore>::new();
+    let mut uncovered_major_tokens = HashMap::<(Address, [u8; 4], &'static str), u64>::new();
+    let started = Instant::now();
+
+    let mut score_trace = |trace: TraceRecord| {
+        let caller = trace.caller.unwrap_or_default();
+        let historical = planner
+            .plan(trace.address, caller, &trace.calldata)
+            .unwrap_or_default();
+        let decoded = decoder.decode(trace.address, caller, &trace.calldata);
+        let historical = historical
+            .storage
+            .into_iter()
+            .zip(historical.storage_confidence)
+            .filter(|(_, confidence)| (confidence * 10_000.0).round() as u16 >= min_confidence_bps)
+            .map(|(target, _)| (target.address, target.slot))
+            .collect::<HashSet<_>>();
+        let decoded = decoded
+            .storage
+            .into_iter()
+            .zip(decoded.storage_confidence)
+            .filter(|(_, confidence)| (confidence * 10_000.0).round() as u16 >= min_confidence_bps)
+            .map(|(target, _)| target)
+            .map(|target| (target.address, target.slot))
+            .collect::<HashSet<_>>();
+        let actual = trace.storage_accesses.into_iter().collect::<HashSet<_>>();
+        let combined = historical.union(&decoded).copied().collect::<HashSet<_>>();
+        let added = decoded
+            .difference(&historical)
+            .copied()
+            .collect::<HashSet<_>>();
+
+        historical_score.observe(&historical, &actual);
+        decoder_score.observe(&decoded, &actual);
+        combined_score.observe(&combined, &actual);
+        added_score.observe(&added, &actual);
+        if !decoded.is_empty() {
+            additions_by_call
+                .entry(decoder_category(trace.address))
+                .or_default()
+                .observe(&added, &actual);
+        }
+        for prediction in &added {
+            let score = additions_by_state
+                .entry(state_category(prediction.0))
+                .or_default();
+            if actual.contains(prediction) {
+                score.hits += 1;
+            } else {
+                score.misses += 1;
+            }
+        }
+        let selector = trace
+            .calldata
+            .get(..4)
+            .and_then(|value| value.try_into().ok());
+        if let Some(selector) = selector {
+            for (address, _) in actual.difference(&combined) {
+                let category = state_category(*address);
+                if matches!(category, "USDC" | "WETH" | "cbBTC") {
+                    *uncovered_major_tokens
+                        .entry((trace.address, selector, category))
+                        .or_default() += 1;
+                }
+            }
+        }
+        traces += 1;
+        decoded_traces += u64::from(!decoded.is_empty());
+    };
+
+    for path in trace_paths {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
+            let file = fs::File::open(path).expect("Failed to open traces file");
+            for (line_number, line) in BufReader::new(file).lines().enumerate() {
+                let line = line.expect("Failed to read trace line");
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let trace = serde_json::from_str(&line).unwrap_or_else(|error| {
+                    panic!(
+                        "Failed to parse trace JSON at {}:{}: {error}",
+                        path.display(),
+                        line_number + 1
+                    )
+                });
+                score_trace(trace);
+            }
+        } else {
+            let traces_json = fs::read_to_string(path).expect("Failed to read traces file");
+            let records: Vec<TraceRecord> =
+                serde_json::from_str(&traces_json).expect("Failed to parse traces JSON");
+            for trace in records {
+                score_trace(trace);
+            }
+        }
+    }
+
+    println!(
+        "Decoder score over {traces} traces ({decoded_traces} emitted deterministic storage targets) in {:?}:",
+        started.elapsed()
+    );
+    historical_score.print("Hint table");
+    decoder_score.print("Decoders only");
+    added_score.print("Decoder additions");
+    combined_score.print("Combined");
+    println!("Incremental decoder score by top-level call:");
+    for (category, score) in additions_by_call {
+        score.print(category);
+    }
+    println!("Incremental decoder precision by state contract:");
+    for (category, score) in additions_by_state {
+        score.print_precision(category);
+    }
+    let mut uncovered_major_tokens = uncovered_major_tokens.into_iter().collect::<Vec<_>>();
+    uncovered_major_tokens.sort_unstable_by_key(|(_, count)| std::cmp::Reverse(*count));
+    println!("Largest top-level sources of uncovered major-token state:");
+    for ((target, selector, token), count) in uncovered_major_tokens.into_iter().take(20) {
+        println!(
+            "  {count:<8} {token:<6} target={target} selector=0x{}",
+            hex::encode(selector)
+        );
+    }
+}
+
+fn decoder_category(target: Address) -> &'static str {
+    if target == address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913") {
+        "direct USDC"
+    } else if target == address!("4200000000000000000000000000000000000006") {
+        "direct WETH"
+    } else if target == address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf") {
+        "direct cbBTC"
+    } else if target == address!("2626664c2603336E57B271c5C0b26F421741e481") {
+        "Uniswap v3 router"
+    } else if target == address!("6fF5693b99212Da76ad316178A184AB56D299b43")
+        || target == address!("Fdf682F51FE81Aa4898F0AE2163d8A55c127fbC7")
+    {
+        "Universal Router"
+    } else if target == address!("cF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43") {
+        "Aerodrome router"
+    } else if target == address!("BE6D8f0d05cC4be24d5167a3eF062215bE6D18a5")
+        || target == address!("cbBb8035cAc7D4B3Ca7aBb74cF7BdF900215Ce0D")
+    {
+        "Slipstream router"
+    } else if target == address!("0770d2124C0a581C28Cfc47a659817145e6Cc137") {
+        "Surplus settlement"
+    } else if target == address!("0000000000001fF3684f28c67538d4D072C22734") {
+        "0x AllowanceHolder"
+    } else if target == address!("CcC88a9d1B4ED6b0EABA998850414b24f1c315bE") {
+        "Relay approval proxy"
+    } else if target == address!("F94ef760884b0605E433853Aed17DA574160226E") {
+        "Limitless fee module"
+    } else if target == address!("5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
+        || target == address!("0000000071727De22E5E9d8BAf0edAc6f37da032")
+        || target == address!("4337084D9E255Ff0702461CF8895CE9E3b5Ff108")
+    {
+        "EntryPoint"
+    } else if target == address!("C3236716cbDC725b518AC0A5d830FBaDcfd05032")
+        || target == address!("fA4071b58D87cBc7aF904F4C02F64318167655a2")
+    {
+        "batch transfers"
+    } else {
+        "other"
+    }
+}
+
+fn state_category(target: Address) -> &'static str {
+    if target == address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913") {
+        "USDC"
+    } else if target == address!("4200000000000000000000000000000000000006") {
+        "WETH"
+    } else if target == address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf") {
+        "cbBTC"
+    } else if target == address!("000000000022D473030F116dDEE9F6B43aC78BA3") {
+        "Permit2"
+    } else if target == address!("498581ff718922c3f8e6a244956af099b2652b2b") {
+        "Uniswap v4 manager"
+    } else {
+        "other"
+    }
 }
 
 fn cmd_inspect(hints_path: &std::path::Path, fmt: &OutputFormat) {

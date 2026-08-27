@@ -5,6 +5,7 @@ members = [
     "crates/dowse-core",
     "crates/dowse-analyze",
     "crates/dowse-cli",
+    "crates/dowse-decode",
 ]
 resolver = "2"
 
