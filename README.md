@@ -10,19 +10,24 @@ execution begins. Each cold SLOAD costs 2,100 gas and may stall a sequential pip
 
 Dowse analyzes contract bytecode (via symbolic execution) or recorded traces to produce
 a **hint table**: a mapping of `(code_hash, selector) → [PrefetchItem]`. At block
-execution time, a prefetch inspector fires on each call, resolves the hint items using
-actual calldata and caller, and warms the database cache in parallel.
+execution time, a consumer resolves top-level transaction plans using calldata and the
+sender, then schedules the resulting state reads on background workers.
 
 ```
-analyze bytecode ──→ HintTable ──→ PrefetchInspector ──→ warm DB cache
-                        (JSON / binary)                    before EVM accesses
+analyze bytecode ──→ HintTable ──→ PrefetchPlanner ──→ background state reads
+                        (JSON / binary)                 ahead of EVM execution
 ```
+
+The older `PrefetchInspector` is still available for experiments, but its reads are
+synchronous with the transaction being inspected. It should not be placed on a
+latency-critical execution path.
 
 ## Crates
 
 | Crate | Purpose |
 |---|---|
 | `dowse-types` | `HintTable`, `PrefetchItem`, `SlotExpression` — the shared data model |
+| `dowse-plan` | Resolve transaction context into bounded background prefetch targets, without `revm` |
 | `dowse-analyze` | Symbolic EVM + trace inference → produces `HintTable` entries |
 | `dowse-core` | Runtime components: `PrefetchInspector`, `RecordingInspector`, proxy detection, trimming, scoring |
 | `dowse-cli` | `dowse` binary — generate, inspect, validate, merge, convert |
@@ -49,6 +54,12 @@ dowse inspect --hints hints.json
 
 # Validate hints against recorded traces
 dowse validate --hints hints.json --traces traces.json
+
+# Infer hints from recorded traces
+dowse infer --traces traces.json --output inferred-hints.json
+
+# Infer the same hints incrementally without retaining the trace corpus in memory
+dowse infer-online --traces traces.jsonl --output inferred-hints.json
 
 # Merge multiple hint tables
 dowse merge hints-a.json hints-b.json --output merged.json
@@ -81,6 +92,29 @@ Proxy detection runs automatically unless `--no-proxy` is passed. EIP-1967,
 OpenZeppelin legacy, and beacon proxy patterns are recognized. Proxy bytecode is
 analyzed alongside the implementation so that proxy-level SLOADs (e.g. loading the
 implementation address) are captured.
+
+### `infer`
+
+Builds a hint table from recorded execution traces.
+
+```
+dowse infer --traces <FILE> [--fixed-slot-min-frequency 0.8] \
+  [--format human|json|binary] [--output <FILE>]
+```
+
+### `infer-online`
+
+Consumes one `TraceRecord` JSON object per line and updates compact inference counters
+instead of retaining calldata and complete traces. The resulting table is equivalent
+to `infer` over the same observations.
+
+```
+dowse infer-online --traces <JSONL_FILE> [--fixed-slot-min-frequency 0.8] \
+  [--format human|json|binary] [--output <FILE>]
+```
+
+The learner is cumulative. Long-running or untrusted deployments must add decay and
+cardinality limits before enabling it in-process.
 
 ### `inspect`
 
@@ -149,6 +183,9 @@ dowse convert --input FILE --from json --to binary [--output FILE]
 
 // Load account info for an address computed from storage at runtime
 { "kind": "ComputedAccount", "address": <SlotExpression>, "selector": "0x70a08231" }
+
+// Attach an access-probability estimate while keeping legacy unscored items valid
+{ "kind": "Scored", "confidence": 0.8, "item": <PrefetchItem> }
 ```
 
 ### SlotExpression types
@@ -166,7 +203,7 @@ dowse convert --input FILE --from json --to binary [--output FILE]
 
 Compact encoding for hot paths. Each entry: `[32B code_hash][4B selector][1B count][items...]`.
 
-Item tags: `0x01` Account, `0x02` Storage, `0x03` ComputedAccount, `0x04` Account+selector, `0x05` ComputedAccount+selector.
+Item tags: `0x01` Account, `0x02` Storage, `0x03` ComputedAccount, `0x04` Account+selector, `0x05` ComputedAccount+selector, `0x06` ExternalStorage, `0x07` Scored.
 
 SlotExpression tags: `0x01` Concrete, `0x02` CalldataWord, `0x03` Caller, `0x04` Keccak256, `0x05` Add, `0x06` SLoad.
 
@@ -203,7 +240,10 @@ Maximum branch depth: 32. Visited `(pc, stack_fingerprint)` states prevent loops
 `infer_from_traces` builds a hint table from recorded execution data instead of
 bytecode. It groups traces by `(address, selector)`, emits `Concrete` slots that
 appear in ≥80% of traces, and attempts to reverse-engineer `keccak256` mapping slots
-by trying common calldata offsets and base slot indices.
+by trying common calldata offsets, the transaction sender, and base slot indices.
+`--fixed-slot-min-frequency` makes the concrete-slot threshold configurable.
+`OnlineHintLearner` produces equivalent snapshots while retaining aggregate counts
+rather than the original trace payloads.
 
 ## Proxy detection
 
